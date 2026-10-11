@@ -1,7 +1,15 @@
 import { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
 
-export async function signUp({ email, password, name, role = 'student', school = 'Model Higher Secondary School' }) {
+export async function signUp({
+  email,
+  password,
+  name,
+  role = 'student',
+  school = 'Model Higher Secondary School',
+  studentClass = 'Class 11-A',
+  studentHouse = 'Terra House',
+}) {
   const cleanEmail = email.toLowerCase().trim();
   
   const { data: authData, error: authError } = await supabase.auth.signUp({
@@ -12,6 +20,8 @@ export async function signUp({ email, password, name, role = 'student', school =
         name,
         role,
         school,
+        studentClass,
+        studentHouse,
       },
     },
   });
@@ -25,6 +35,8 @@ export async function signUp({ email, password, name, role = 'student', school =
       email: cleanEmail,
       role,
       school,
+      student_class: studentClass,
+      student_house: studentHouse,
     });
     if (profileError) console.error('Profile creation error:', profileError);
   }
@@ -119,6 +131,8 @@ export function useAuth() {
         name: profile?.name || user.user_metadata?.name || user.email?.split('@')[0],
         role: profile?.role || user.user_metadata?.role || 'student',
         school: profile?.school || user.user_metadata?.school || 'Model Higher Secondary School',
+        studentClass: profile?.student_class || user.user_metadata?.studentClass || 'Class 11-A',
+        studentHouse: profile?.student_house || user.user_metadata?.studentHouse || 'Terra House',
       }
     : null;
 

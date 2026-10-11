@@ -73,6 +73,8 @@ export default function AuthPage({ onAuthSuccess }) {
   const [signupPassword, setSignupPassword] = useState('');
   const [signupRole, setSignupRole] = useState('student');
   const [signupSchool, setSignupSchool] = useState('Model Higher Secondary School');
+  const [signupClass, setSignupClass] = useState('Class 11-A');
+  const [signupHouse, setSignupHouse] = useState('Terra House');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -115,6 +117,8 @@ export default function AuthPage({ onAuthSuccess }) {
         name: signupName,
         role: signupRole,
         school: signupSchool,
+        studentClass: signupRole === 'student' ? signupClass : null,
+        studentHouse: signupRole === 'student' ? signupHouse : null,
       });
       if (onAuthSuccess) onAuthSuccess();
     } catch (err) {
@@ -501,6 +505,43 @@ export default function AuthPage({ onAuthSuccess }) {
                     ))}
                   </div>
                 </div>
+
+                {/* Student Class and House selectors as requested */}
+                {signupRole === 'student' && (
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">Grade / Class</label>
+                      <select
+                        value={signupClass}
+                        onChange={(e) => setSignupClass(e.target.value)}
+                        className="form-input"
+                        style={{ height: '54px', borderRadius: '14px', paddingLeft: '16px' }}
+                      >
+                        <option value="Class 11-A">Class 11-A</option>
+                        <option value="Class 11-B">Class 11-B</option>
+                        <option value="Class 10-A">Class 10-A</option>
+                        <option value="Class 10-B">Class 10-B</option>
+                        <option value="Class 12-A">Class 12-A</option>
+                        <option value="Class 12-B">Class 12-B</option>
+                      </select>
+                    </div>
+
+                    <div className="form-group" style={{ marginBottom: 0 }}>
+                      <label className="form-label">School House</label>
+                      <select
+                        value={signupHouse}
+                        onChange={(e) => setSignupHouse(e.target.value)}
+                        className="form-input"
+                        style={{ height: '54px', borderRadius: '14px', paddingLeft: '16px' }}
+                      >
+                        <option value="Terra House">🌍 Terra House</option>
+                        <option value="Solar House">☀️ Solar House</option>
+                        <option value="Aqua House">💧 Aqua House</option>
+                        <option value="Flora House">🌸 Flora House</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
 
                 <div className="form-group" style={{ marginBottom: 0 }}>
                   <label className="form-label">School / Organization</label>

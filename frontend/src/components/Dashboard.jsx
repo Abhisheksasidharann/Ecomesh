@@ -29,7 +29,7 @@ import {
   ArrowRight,
   Eye,
 } from 'lucide-react';
-import { EMISSION_FACTORS, REGISTERED_SCHOOL } from '../lib/constants';
+import { EMISSION_FACTORS, REGISTERED_SCHOOL, getStudentLevel, SCHOOL_GOAL } from '../lib/constants';
 
 const COLORS = ['#10b981', '#06b6d4', '#f59e0b', '#f97316', '#8b5cf6', '#ec4899'];
 
@@ -54,78 +54,211 @@ export default function Dashboard({
     (s) => s.student_email === user?.email || s.user_id === user?.id
   );
   const myVerified = mySubmissions.filter((s) => s.status === 'verified');
+  const myPending = mySubmissions.filter((s) => s.status === 'review' || s.status === 'pending');
+
   const myCO2 = Number(
     myVerified
       .reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0)
       .toFixed(2)
   );
-  const myPoints = myVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  const myVerifiedPoints = myVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  const myPendingPoints = myPending.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
   const myVerifiedActions = myVerified.length;
+
+  // Gamification v2 Level (Seedling → Sapling → Tree → Grove → Forest)
+  const studentLevel = getStudentLevel(myVerifiedPoints);
+
+  // School Goal Centerpiece (500 kg CO2 target)
+  const schoolGoalTarget = SCHOOL_GOAL.targetKg;
+  const schoolGoalCurrent = Number(totalCO2.toFixed(1));
+  const schoolGoalPercent = Math.min(100, Math.round((schoolGoalCurrent / schoolGoalTarget) * 100));
+
+  // Weekly Streaks (active 4 weeks in a row to avoid fake daily claims)
+  const activeWeeksCount = Math.min(4, Math.max(myVerified.length > 0 ? 1 : 0, Math.ceil(myVerified.length / 2)));
+  const streakWeeks = [
+    { label: 'Week 1', active: activeWeeksCount >= 1 },
+    { label: 'Week 2', active: activeWeeksCount >= 2 },
+    { label: 'Week 3', active: activeWeeksCount >= 3 },
+    { label: 'Week 4', active: activeWeeksCount >= 4 },
+  ];
+
+  // Adaptive Mission Planner: Diversity nudge
+  const categoriesDone = new Set(myVerified.map((s) => s.activity));
+  let adaptiveMission = {
+    title: 'Plant a Native Sapling',
+    activity: 'plantation',
+    bonusText: '+30 EcoPoints',
+    nudgeReason: 'Weekly Core Challenge: Boost campus canopy cover',
+  };
+
+  if (categoriesDone.has('plantation') && !categoriesDone.has('waste')) {
+    adaptiveMission = {
+      title: 'Sort Recyclables Sprint',
+      activity: 'waste',
+      bonusText: '+25 EcoPoints (+10 Diversity Bonus!)',
+      nudgeReason: 'Adaptive Diversity Nudge: You mastered trees! Try waste segregation for extra points.',
+    };
+  } else if (categoriesDone.has('waste') && !categoriesDone.has('transport')) {
+    adaptiveMission = {
+      title: 'Zero-Emission Commute',
+      activity: 'transport',
+      bonusText: '+20 EcoPoints (+10 Diversity Bonus!)',
+      nudgeReason: 'Adaptive Diversity Nudge: Cycle or walk to school this week to unlock All-Rounder badge.',
+    };
+  }
 
   // Real world equivalents calculated from real CO2
   const kmDrivingOffset = Math.round(myCO2 * 4.1);
   const treesEquiv = Math.max(1, Math.round(myCO2 / 10));
   const ledHoursEquiv = Math.round(myCO2 * 65);
 
-  const daysOfWeek = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
-
   return (
     <div className="page-container gradient-mesh">
-      {/* 1. STUDENT HERO BANNER */}
+      {/* 1. SCHOOL GOAL CENTERPIECE (The Unique EcoMesh Angle Linking Action to Real Benefit) */}
+      {activeRole === 'student' && (
+        <div className="glass-card" style={{
+          marginBottom: '28px',
+          background: 'linear-gradient(135deg, #064e3b 0%, #047857 60%, #0d9488 100%)',
+          color: '#ffffff',
+          padding: '28px 32px',
+          position: 'relative',
+          overflow: 'hidden',
+          boxShadow: '0 16px 40px rgba(6, 78, 59, 0.22)',
+          border: '1px solid rgba(255, 255, 255, 0.25)',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '16px', marginBottom: '16px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{
+                width: '46px',
+                height: '46px',
+                borderRadius: '14px',
+                backgroundColor: 'rgba(255, 255, 255, 0.18)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#fde047',
+              }}>
+                <Sun size={26} />
+              </div>
+              <div>
+                <div style={{ fontSize: '0.78rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#a7f3d0' }}>
+                  School-Wide Milestone Goal
+                </div>
+                <h2 style={{ fontSize: '1.45rem', fontWeight: 800, color: '#ffffff', margin: 0 }}>
+                  {SCHOOL_GOAL.title}
+                </h2>
+              </div>
+            </div>
+
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: '1.4rem', fontWeight: 800, color: '#fde047' }}>
+                {schoolGoalCurrent} / {schoolGoalTarget} kg CO₂e
+              </div>
+              <div style={{ fontSize: '0.82rem', color: '#d1fae5' }}>
+                {schoolGoalPercent}% toward unlocking CSR solar funding
+              </div>
+            </div>
+          </div>
+
+          {/* Progress Bar */}
+          <div style={{
+            height: '10px',
+            backgroundColor: 'rgba(0, 0, 0, 0.25)',
+            borderRadius: '9999px',
+            overflow: 'hidden',
+            marginBottom: '14px',
+          }}>
+            <div style={{
+              height: '100%',
+              width: `${schoolGoalPercent}%`,
+              background: 'linear-gradient(90deg, #34d399, #fde047)',
+              borderRadius: '9999px',
+              transition: 'width 0.5s ease',
+            }} />
+          </div>
+
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', fontSize: '0.84rem', color: '#ecfdf5' }}>
+            <div>
+              💡 <strong>Impact Outcome:</strong> {SCHOOL_GOAL.outcome}
+            </div>
+            <div>
+              Your verified actions contributed <strong>{myCO2} kg</strong> toward our campus target!
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 2. STUDENT HERO BANNER */}
       {activeRole === 'student' ? (
         <div className="glass-card" style={{
           marginBottom: '32px',
-          background: 'linear-gradient(135deg, #064e3b 0%, #047857 55%, #0d9488 100%)',
-          color: '#ffffff',
+          background: '#ffffff',
+          color: '#0f172a',
           position: 'relative',
-          overflow: 'hidden',
-          padding: '36px 40px',
-          boxShadow: '0 20px 45px rgba(6, 78, 59, 0.25)',
-          border: '1px solid rgba(255, 255, 255, 0.25)',
+          padding: '32px 36px',
+          boxShadow: '0 8px 30px rgba(0, 0, 0, 0.04)',
+          border: '1px solid #e2e8f0',
         }}>
-          {/* Subtle background glow effect */}
-          <div style={{
-            position: 'absolute',
-            top: '-50px',
-            right: '-50px',
-            width: '260px',
-            height: '260px',
-            borderRadius: '9999px',
-            background: 'radial-gradient(circle, rgba(52, 211, 153, 0.3) 0%, transparent 70%)',
-            pointerEvents: 'none',
-          }} />
-
           <div style={{
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'space-between',
             flexWrap: 'wrap',
             gap: '24px',
-            position: 'relative',
-            zIndex: 2,
           }}>
             <div>
-              <div style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '8px',
-                padding: '6px 14px',
-                borderRadius: '9999px',
-                backgroundColor: 'rgba(255, 255, 255, 0.18)',
-                backdropFilter: 'blur(8px)',
-                fontSize: '0.825rem',
-                fontWeight: 700,
-                color: '#d1fae5',
-                marginBottom: '14px',
-              }}>
-                <Sparkles size={15} color="#fde047" />
-                <span>Student Climate Champion • {user?.school || REGISTERED_SCHOOL.name}</span>
+              {/* Badges: Level + Class + House */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginBottom: '14px' }}>
+                <div style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '5px 12px',
+                  borderRadius: '9999px',
+                  backgroundColor: '#ecfdf5',
+                  color: '#047857',
+                  border: '1px solid #a7f3d0',
+                  fontSize: '0.82rem',
+                  fontWeight: 700,
+                }}>
+                  <span>{studentLevel.icon} Level: {studentLevel.name}</span>
+                </div>
+
+                <div style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '5px 12px',
+                  borderRadius: '9999px',
+                  backgroundColor: '#eff6ff',
+                  color: '#1d4ed8',
+                  border: '1px solid #bfdbfe',
+                  fontSize: '0.82rem',
+                  fontWeight: 700,
+                }}>
+                  <span>{user?.studentClass || 'Class 11-A'}</span>
+                </div>
+
+                <div style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '5px 12px',
+                  borderRadius: '9999px',
+                  backgroundColor: '#fef3c7',
+                  color: '#b45309',
+                  border: '1px solid #fde68a',
+                  fontSize: '0.82rem',
+                  fontWeight: 700,
+                }}>
+                  <span>{user?.studentHouse || 'Terra House'}</span>
+                </div>
               </div>
 
               <h1 style={{
-                fontSize: '2.5rem',
+                fontSize: '2.4rem',
                 fontWeight: 800,
-                color: '#ffffff',
+                color: '#0f172a',
                 lineHeight: 1.15,
                 marginBottom: '10px',
                 letterSpacing: '-0.03em',
@@ -133,25 +266,26 @@ export default function Dashboard({
                 Welcome back, {user?.name || 'Abhishek'}! 🌿
               </h1>
 
-              <p style={{ fontSize: '1.05rem', color: '#ecfdf5', maxWidth: '620px', lineHeight: 1.6, marginBottom: '22px' }}>
-                You have prevented <strong style={{ color: '#fde047' }}>{myCO2} kg of CO₂</strong> from entering our air.
-                Every verified habit helps fund solar power for our school!
+              <p style={{ fontSize: '1.02rem', color: '#475569', maxWidth: '620px', lineHeight: 1.6, marginBottom: '20px' }}>
+                You have verified <strong style={{ color: '#047857' }}>{myCO2} kg of CO₂</strong> reductions.
+                Your efforts help unlock solar power for {user?.school || REGISTERED_SCHOOL.name}!
               </p>
 
               {/* Real World Impact Equivalencies */}
-              <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
                 <div style={{
                   display: 'inline-flex',
                   alignItems: 'center',
                   gap: '8px',
                   padding: '7px 14px',
                   borderRadius: '10px',
-                  backgroundColor: 'rgba(0, 0, 0, 0.2)',
-                  fontSize: '0.85rem',
-                  color: '#ffffff',
+                  backgroundColor: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  fontSize: '0.84rem',
+                  color: '#334155',
                   fontWeight: 600,
                 }}>
-                  <Leaf size={16} color="#34d399" />
+                  <Leaf size={16} color="#059669" />
                   <span>Equal to ~{treesEquiv} saplings absorbing CO₂</span>
                 </div>
 
@@ -161,13 +295,14 @@ export default function Dashboard({
                   gap: '8px',
                   padding: '7px 14px',
                   borderRadius: '10px',
-                  backgroundColor: 'rgba(0, 0, 0, 0.2)',
-                  fontSize: '0.85rem',
-                  color: '#ffffff',
+                  backgroundColor: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  fontSize: '0.84rem',
+                  color: '#334155',
                   fontWeight: 600,
                 }}>
-                  <Car size={16} color="#38bdf8" />
-                  <span>Prevents ~{kmDrivingOffset} km of car driving</span>
+                  <Car size={16} color="#0284c7" />
+                  <span>Prevents ~{kmDrivingOffset} km driving</span>
                 </div>
 
                 <div style={{
@@ -176,28 +311,29 @@ export default function Dashboard({
                   gap: '8px',
                   padding: '7px 14px',
                   borderRadius: '10px',
-                  backgroundColor: 'rgba(0, 0, 0, 0.2)',
-                  fontSize: '0.85rem',
-                  color: '#ffffff',
+                  backgroundColor: '#f8fafc',
+                  border: '1px solid #e2e8f0',
+                  fontSize: '0.84rem',
+                  color: '#334155',
                   fontWeight: 600,
                 }}>
-                  <Zap size={16} color="#fde047" />
-                  <span>Saves ~{ledHoursEquiv} hrs of light</span>
+                  <Zap size={16} color="#d97706" />
+                  <span>Saves ~{ledHoursEquiv} hrs light</span>
                 </div>
               </div>
             </div>
 
-            {/* Habit Streak & Action Trigger */}
+            {/* Weekly Habit Streak (Active 4 weeks in a row) */}
             <div style={{
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'flex-start',
-              gap: '16px',
-              backgroundColor: 'rgba(255, 255, 255, 0.12)',
-              backdropFilter: 'blur(12px)',
-              padding: '20px 24px',
+              gap: '14px',
+              backgroundColor: '#f8fafc',
+              padding: '22px 24px',
               borderRadius: '18px',
-              border: '1px solid rgba(255, 255, 255, 0.2)',
+              border: '1px solid #e2e8f0',
+              minWidth: '280px',
             }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <div style={{
@@ -209,73 +345,117 @@ export default function Dashboard({
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  boxShadow: '0 4px 12px rgba(234, 88, 12, 0.4)',
+                  boxShadow: '0 4px 12px rgba(234, 88, 12, 0.3)',
                 }}>
                   <Flame size={22} />
                 </div>
                 <div>
-                  <div style={{ fontSize: '1.15rem', fontWeight: 800, color: '#ffffff' }}>
-                    {myVerified.length > 0 ? `${Math.min(7, myVerified.length)}-Day Active Streak` : 'Start Your Streak'}
+                  <div style={{ fontSize: '1.1rem', fontWeight: 800, color: '#0f172a' }}>
+                    {activeWeeksCount > 0 ? `${activeWeeksCount}-Week Habit Streak` : 'Start Weekly Streak'}
                   </div>
-                  <div style={{ fontSize: '0.78rem', color: '#d1fae5' }}>
-                    Log an action today to keep it burning!
+                  <div style={{ fontSize: '0.76rem', color: '#64748b' }}>
+                    Active 4 weeks in a row (sustainable habits)
                   </div>
                 </div>
               </div>
 
-              {/* 7-Day Dots */}
-              <div style={{ display: 'flex', gap: '8px' }}>
-                {daysOfWeek.map((day, idx) => {
-                  const streakLen = Math.min(7, myVerified.length);
-                  const isActive = idx < (streakLen > 0 ? streakLen : 0);
-                  return (
-                    <div key={idx} style={{ textAlign: 'center' }}>
-                      <div style={{
-                        width: '28px',
-                        height: '28px',
-                        borderRadius: '9999px',
-                        backgroundColor: isActive ? '#fde047' : 'rgba(255, 255, 255, 0.2)',
-                        color: isActive ? '#064e3b' : '#ffffff',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        fontSize: '0.78rem',
-                        fontWeight: 800,
-                        marginBottom: '4px',
-                      }}>
-                        {isActive ? '🔥' : day}
-                      </div>
-                      <span style={{ fontSize: '0.65rem', color: '#a7f3d0' }}>{day}</span>
+              {/* 4 Weekly Indicators */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px', width: '100%' }}>
+                {streakWeeks.map((wk, idx) => (
+                  <div
+                    key={idx}
+                    style={{
+                      padding: '8px 4px',
+                      borderRadius: '10px',
+                      backgroundColor: wk.active ? '#ecfdf5' : '#ffffff',
+                      border: wk.active ? '1.5px solid #10b981' : '1px solid #e2e8f0',
+                      textAlign: 'center',
+                    }}
+                  >
+                    <div style={{ fontSize: '0.9rem', marginBottom: '2px' }}>
+                      {wk.active ? '🔥' : '○'}
                     </div>
-                  );
-                })}
+                    <div style={{ fontSize: '0.68rem', fontWeight: 700, color: wk.active ? '#047857' : '#94a3b8' }}>
+                      {wk.label}
+                    </div>
+                  </div>
+                ))}
               </div>
 
               <button
                 onClick={onNavigateUpload}
+                className="gradient-btn"
                 style={{
                   width: '100%',
                   padding: '12px 18px',
                   borderRadius: '12px',
-                  border: 'none',
-                  backgroundColor: '#ffffff',
-                  color: '#064e3b',
                   fontFamily: 'var(--font-heading)',
-                  fontSize: '0.925rem',
-                  fontWeight: 800,
+                  fontSize: '0.95rem',
+                  fontWeight: 700,
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '8px',
-                  boxShadow: '0 4px 14px rgba(0, 0, 0, 0.15)',
-                  transition: 'all 0.2s ease',
                 }}
               >
-                <PlusCircle size={17} color="#059669" />
+                <PlusCircle size={18} />
                 <span>+ Log Green Action</span>
               </button>
             </div>
+          </div>
+
+          {/* This Week's Adaptive Mission Spotlight */}
+          <div style={{
+            marginTop: '24px',
+            padding: '16px 20px',
+            borderRadius: '14px',
+            backgroundColor: '#f0fdf4',
+            border: '1px solid #bbf7d0',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '12px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <div style={{
+                width: '36px',
+                height: '36px',
+                borderRadius: '10px',
+                backgroundColor: '#10b981',
+                color: '#ffffff',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}>
+                <Sparkles size={18} />
+              </div>
+              <div>
+                <div style={{ fontSize: '0.75rem', fontWeight: 800, textTransform: 'uppercase', color: '#047857' }}>
+                  This Week's Mission • {adaptiveMission.bonusText}
+                </div>
+                <div style={{ fontSize: '0.96rem', fontWeight: 700, color: '#0f172a' }}>
+                  {adaptiveMission.title} — <span style={{ fontWeight: 400, color: '#475569', fontSize: '0.88rem' }}>{adaptiveMission.nudgeReason}</span>
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={onNavigateUpload}
+              style={{
+                padding: '8px 16px',
+                borderRadius: '8px',
+                backgroundColor: '#059669',
+                color: '#ffffff',
+                fontWeight: 700,
+                fontSize: '0.85rem',
+                border: 'none',
+                cursor: 'pointer',
+              }}
+            >
+              Start Mission
+            </button>
           </div>
         </div>
       ) : (

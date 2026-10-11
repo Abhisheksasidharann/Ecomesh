@@ -20,6 +20,8 @@ import {
   Sparkles,
 } from 'lucide-react';
 
+import { getStudentLevel } from '../lib/constants';
+
 export default function Sidebar({
   activeTab,
   setActiveTab,
@@ -31,17 +33,15 @@ export default function Sidebar({
   const { user, signOut } = useAuth();
   const role = currentRole || user?.role || 'student';
 
-  // Calculate live student level and badge progress
+  // Calculate live student level and badge progress (Gamification v2)
   const myVerified = submissions.filter(
     (s) => (s.student_email === user?.email || s.user_id === user?.id) && s.status === 'verified'
   );
   const myCO2 = myVerified.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0);
+  const myPoints = myVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
   const myActions = myVerified.length;
-  const streakDays = Math.min(7, myActions);
-  const level = myCO2 >= 100 ? 5 : myCO2 >= 50 ? 4 : myCO2 >= 20 ? 3 : myCO2 >= 5 ? 2 : 1;
-  const targetNext = myCO2 < 50 ? 50 : 100;
-  const nextBadgeName = myCO2 < 50 ? '50 kg Carbon Club' : 'Century 100kg Champion';
-  const progressPercent = Math.min(100, Math.round((myCO2 / targetNext) * 100));
+  const activeWeeks = Math.min(4, Math.floor(myActions / 2) || (myActions > 0 ? 1 : 0));
+  const levelInfo = getStudentLevel(myPoints);
 
   const getRoleBadge = () => {
     if (role === 'admin') {
@@ -367,7 +367,7 @@ export default function Sidebar({
                 <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                   <Flame size={16} style={{ color: '#ea580c' }} />
                   <span style={{ fontSize: '0.82rem', fontWeight: 800, color: '#0f172a' }}>
-                    Active Streak: {streakDays > 0 ? `${streakDays} Days` : 'Day 1'}
+                    {activeWeeks > 0 ? `${activeWeeks}-Week Streak` : 'Week 1 Active'}
                   </span>
                 </div>
                 <span style={{
@@ -375,14 +375,14 @@ export default function Sidebar({
                   fontWeight: 800,
                   color: '#047857',
                   backgroundColor: '#d1fae5',
-                  padding: '2px 6px',
-                  borderRadius: '4px',
+                  padding: '2px 8px',
+                  borderRadius: '6px',
                 }}>
-                  Lvl {level}
+                  {levelInfo.icon} {levelInfo.name}
                 </span>
               </div>
               <div style={{ fontSize: '0.76rem', color: '#64748b', marginBottom: '8px' }}>
-                Next Badge: <strong>{nextBadgeName}</strong> ({progressPercent}% done)
+                Next: <strong>{levelInfo.nextLevelName}</strong> ({levelInfo.progressPercent}% to Tier {levelInfo.level + 1})
               </div>
               <div style={{
                 height: '6px',
@@ -393,7 +393,7 @@ export default function Sidebar({
               }}>
                 <div style={{
                   height: '100%',
-                  width: `${progressPercent}%`,
+                  width: `${levelInfo.progressPercent}%`,
                   background: 'linear-gradient(90deg, #10b981, #059669)',
                   borderRadius: '9999px',
                   transition: 'width 0.4s ease',
