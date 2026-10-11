@@ -24,7 +24,22 @@ export function useSubmissions() {
         .order('created_at', { ascending: false });
 
       if (fetchErr) throw fetchErr;
-      setSubmissions(data || []);
+      const enriched = (data || []).map((s) => {
+        let student_class = s.student_class || 'Class 11-A';
+        let student_house = s.student_house || 'Terra';
+        if (s.note && s.note.includes('[Class:')) {
+          const classMatch = s.note.match(/\[Class:\s*([^|\]]+)/);
+          const houseMatch = s.note.match(/House:\s*([^\]]+)/);
+          if (classMatch) student_class = classMatch[1].trim();
+          if (houseMatch) student_house = houseMatch[1].trim().replace(' House', '');
+        }
+        return {
+          ...s,
+          student_class,
+          student_house,
+        };
+      });
+      setSubmissions(enriched);
     } catch (err) {
       console.error('Error loading submissions from Supabase:', err);
       setError(err.message || 'Failed to fetch verified submissions');
@@ -113,7 +128,9 @@ export function useSubmissions() {
       status: trustEval.status,
       reviewed_by: trustEval.status === 'verified' ? 'Automated Verification Pipeline' : null,
       reviewed_at: trustEval.status === 'verified' ? new Date().toISOString() : null,
-      note: note || '',
+      note: note
+        ? `${note} [Class: ${user?.studentClass || user?.student_class || 'Class 11-A'} | House: ${user?.studentHouse || user?.student_house || 'Terra'}]`
+        : `[Class: ${user?.studentClass || user?.student_class || 'Class 11-A'} | House: ${user?.studentHouse || user?.student_house || 'Terra'}]`,
       created_at: new Date().toISOString(),
     };
 

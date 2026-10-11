@@ -35,8 +35,6 @@ export async function signUp({
       email: cleanEmail,
       role,
       school,
-      student_class: studentClass,
-      student_house: studentHouse,
     });
     if (profileError) console.error('Profile creation error:', profileError);
   }
