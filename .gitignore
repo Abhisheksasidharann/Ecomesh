@@ -2,6 +2,5 @@
 venv/
 __pycache__/
 uploads/
-node_modules/
 test_photos/
-frontend_old/
+node_modules/
