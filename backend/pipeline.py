@@ -57,6 +57,9 @@ def vision_node(state: PipelineState):
         status = "rejected"
     else:
         status = "needs_review"
+    # Fail safe: if the AI could not check the photo, a human must review it
+    if details is None and status == "verified":
+        status = "needs_review"
     return {
         "trust_score": trust,
         "status": status,
