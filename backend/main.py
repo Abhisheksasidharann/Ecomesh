@@ -235,7 +235,7 @@ def review_submission(submission_id: str, body: ReviewIn):
     profile, points, badges = update_profile(
         students.find_one({"_id": s["student_id"]}),
         kg,
-        s["captured_at"].date().isoformat(),
+        s["action_type"],
     )
     update.update({
         "status": "verified",
@@ -278,4 +278,131 @@ def get_student(student_id: str):
         raise HTTPException(status_code=404, detail="No activity yet for this student")
     p["student_id"] = p.pop("_id")
     return p
+# ---------- Students, leaderboard, school goal ----------
+from pydantic import Field
+from gamification_agent import level_for, next_level
+
+
+class StudentIn(BaseModel):
+    student_id: str
+    name: str
+    school_id: str
+    class_name: str
+    house: str = ""
+
+
+class GoalIn(BaseModel):
+    target_kg: float = Field(gt=0)
+    reward: str
+
+
+@app.post("/students/register")
+def register_student(body: StudentIn):
+    if schools.find_one({"_id": body.school_id}) is None:
+        raise HTTPException(status_code=404, detail="Unknown school")
+    students.update_one(
+        {"_id": body.student_id},
+        {
+            "$set": {
+                "name": body.name,
+                "school_id": body.school_id,
+                "class_name": body.class_name,
+                "house": body.house,
+            },
+            "$setOnInsert": {
+                "points": 0,
+                "total_actions": 0,
+                "total_kg_co2e": 0.0,
+                "streak_weeks": 0,
+                "badges": [],
+                "types_done": [],
+                "level": "Seedling",
+            },
+        },
+        upsert=True,
+    )
+    return {"student_id": body.student_id, "registered": True}
+
+
+@app.get("/students/{student_id}/summary")
+def student_summary(student_id: str):
+    p = students.find_one({"_id": student_id})
+    if p is None:
+        raise HTTPException(status_code=404, detail="Student not found")
+    p["student_id"] = p.pop("_id")
+    pts = p.get("points", 0)
+    p["level"] = level_for(pts)
+    p["next_level"] = next_level(pts)
+    p["pending_submissions"] = submissions.count_documents(
+        {"student_id": student_id, "status": {"$in": ["pending", "needs_review"]}}
+    )
+    return p
+
+
+@app.get("/leaderboard/{school_id}")
+def leaderboard(school_id: str, group: Literal["class", "house", "student"] = "class", limit: int = 10):
+    match = {"school_id": school_id}
+    if group == "student":
+        rows = students.find(match).sort("points", -1).limit(limit)
+        return [
+            {
+                "rank": i + 1,
+                "name": (r.get("name") or "").split(" ")[0],  # first name only (minors)
+                "class_name": r.get("class_name"),
+                "points": r.get("points", 0),
+                "level": level_for(r.get("points", 0)),
+                "kg_co2e": round(r.get("total_kg_co2e", 0), 3),
+            }
+            for i, r in enumerate(rows)
+        ]
+    field = "$class_name" if group == "class" else "$house"
+    rows = students.aggregate([
+        {"$match": match},
+        {"$group": {
+            "_id": field,
+            "points": {"$sum": "$points"},
+            "kg_co2e": {"$sum": "$total_kg_co2e"},
+            "students": {"$sum": 1},
+        }},
+        {"$sort": {"points": -1}},
+        {"$limit": limit},
+    ])
+    return [
+        {
+            "rank": i + 1,
+            group: r["_id"],
+            "points": r["points"],
+            "kg_co2e": round(r["kg_co2e"], 3),
+            "students": r["students"],
+        }
+        for i, r in enumerate(rows)
+    ]
+
+
+@app.post("/schools/{school_id}/goal")
+def set_school_goal(school_id: str, body: GoalIn):
+    result = schools.update_one(
+        {"_id": school_id},
+        {"$set": {"goal": {"target_kg": body.target_kg, "reward": body.reward}}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Unknown school")
+    return {"school_id": school_id, "goal_set": True}
+
+
+@app.get("/schools/{school_id}/goal")
+def get_school_goal(school_id: str):
+    s = schools.find_one({"_id": school_id})
+    if s is None:
+        raise HTTPException(status_code=404, detail="Unknown school")
+    goal = s.get("goal") or {"target_kg": 500, "reward": "Not set"}
+    achieved = school_impact(school_id)["total_kg_co2e"]
+    return {
+        "school_id": school_id,
+        "target_kg": goal["target_kg"],
+        "reward": goal["reward"],
+        "achieved_kg": achieved,
+        "percent": min(100, round(achieved / goal["target_kg"] * 100, 1)),
+        "reached": achieved >= goal["target_kg"],
+    }
 

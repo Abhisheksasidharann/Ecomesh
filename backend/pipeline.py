@@ -78,7 +78,7 @@ def gamification_node(state: PipelineState):
     s = state["submission"]
     action_date = s["captured_at"].date().isoformat()
     profile, points, badges = update_profile(
-        state.get("student_profile"), state["impact_kg_co2e"], action_date
+        state.get("student_profile"), state["impact_kg_co2e"], action_date, s["action_type"]
     )
     return {"updated_profile": profile, "points_awarded": points, "new_badges": badges}
 
