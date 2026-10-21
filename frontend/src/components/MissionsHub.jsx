@@ -1,16 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../lib/auth';
 import { BADGE_DEFINITIONS_V2, getStudentLevel, EMISSION_FACTORS } from '../lib/constants';
-import { useStudentSummary } from '../lib/api';
+import { useStudentSummary, apiMyMissions, apiClaimMission } from '../lib/api';
 import {
-  Trophy, Flame, CheckCircle2, Target, Sparkles, ArrowRight, Zap, Leaf, Shield, Compass,
+  Trophy, Flame, CheckCircle2, Target, Sparkles, ArrowRight, Zap, Leaf, Shield, Compass, Gift, RefreshCw, AlertCircle,
 } from 'lucide-react';
 
 export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavigateUpload }) {
   const { user } = useAuth();
-  const [completedQuests, setCompletedQuests] = useState({});
 
-  // ── Live backend summary (real points, level, streak, earned badges) ──────
+  // ── Live backend summary ────────────────────────────────────────────────────
   const summary = useStudentSummary(user?.student_id);
 
   // ── Local submission data (fallback when summary still loading) ─────────
@@ -80,56 +79,77 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
 
   const unlockedCount = BADGE_DEFINITIONS_V2.filter((b) => getBadgeStatus(b).unlocked).length;
 
-  // Adaptive Gamification Engine Missions
-  // 1. Diversity Nudge Mission (recommends an untried category)
+  // ── Live missions from backend ─────────────────────────────────────────────
+  // GET /my/missions returns: { id, kind, action_type, target, bonus, title, reason, progress, complete, claimed }
+  const [liveMissions, setLiveMissions] = useState([]);
+  const [missionsLoading, setMissionsLoading] = useState(true);
+  const [claimingId, setClaimingId] = useState(null);
+  const [claimError, setClaimError] = useState(null);
+
+  useEffect(() => {
+    setMissionsLoading(true);
+    apiMyMissions()
+      .then(setLiveMissions)
+      .catch(() => setLiveMissions([]))
+      .finally(() => setMissionsLoading(false));
+  }, []);
+
+  const handleClaim = async (missionId) => {
+    setClaimingId(missionId);
+    setClaimError(null);
+    try {
+      const result = await apiClaimMission(missionId);
+      // Mark claimed locally for instant UI feedback
+      setLiveMissions((prev) =>
+        prev.map((m) => m.id === missionId ? { ...m, claimed: true } : m)
+      );
+      // Trigger a full summary reload so points update in Sidebar/Dashboard
+      // (the parent useStudentSummary will re-fetch on next render cycle)
+    } catch (err) {
+      setClaimError(err.message || 'Failed to claim bonus. Try again.');
+    } finally {
+      setClaimingId(null);
+    }
+  };
+
+  // Kind → display metadata
+  const KIND_META = {
+    comeback:  { tag: 'Re-engagement Nudge',    icon: '🔄', isHighlight: false },
+    diversity: { tag: 'Adaptive Recommendation', icon: '🌈', isHighlight: true  },
+    challenge: { tag: 'Level Challenge',         icon: '⚡', isHighlight: false },
+  };
+
+  // Fallback local missions shown while backend loads
   const nudgeCategoryKey = untriedCategories[0] || 'solar';
   const nudgeMeta = EMISSION_FACTORS[nudgeCategoryKey] || EMISSION_FACTORS.plantation;
-
-  // 2. Adaptive Mission Target based on Student Level
   const levelMultiplier = Math.max(1, levelInfo.level);
-
-  const adaptiveMissions = [
+  const fallbackMissions = [
     {
-      id: 'mission_diversity_nudge',
-      isAdaptiveNudge: true,
-      title: `Diversity Nudge: Try ${nudgeMeta.name}`,
-      tag: 'Adaptive Recommendation',
-      bonus: '+25 Bonus Pts',
-      description: `Expand your climate habits! You haven't logged ${nudgeMeta.name.toLowerCase()} yet. Earn bonus EcoPoints by trying it this week.`,
-      target: `1 ${nudgeMeta.unit}`,
-      icon: nudgeCategoryKey === 'plantation' ? '🌳' : nudgeCategoryKey === 'waste' ? '♻️' : nudgeCategoryKey === 'transport' ? '🚲' : nudgeCategoryKey === 'solar' ? '☀️' : '💧',
-      actionKey: nudgeCategoryKey,
+      id: 'local_diversity_nudge', kind: 'diversity',
+      title: `Try ${nudgeMeta.name}`,
+      reason: "You haven't logged this action type yet",
+      bonus: 25, target: 1, progress: 0, complete: false, claimed: false,
+      action_type: nudgeCategoryKey,
     },
     {
-      id: 'mission_weekly_habit',
+      id: 'local_weekly_habit', kind: 'challenge',
       title: 'Active Weekly Habit Milestone',
-      tag: 'Weekly Streak Quest',
-      bonus: '+30 EcoPoints',
-      description: 'Submit at least 2 verified green actions on campus grounds this week.',
-      target: realStreakWeeks > 0
-        ? `${realStreakWeeks} week streak active 🔥`
-        : `${Math.min(2, studentActions.length)} / 2 actions completed`,
-      icon: '🔥',
+      reason: 'Submit 2 verified green actions this week',
+      bonus: 30, target: 2, progress: Math.min(2, studentActions.length), complete: studentActions.length >= 2, claimed: false,
+      action_type: null,
     },
     {
-      id: 'mission_level_scaling',
+      id: 'local_level_target', kind: 'challenge',
       title: `Level ${levelInfo.level} Climate Target`,
-      tag: `Scaled for ${levelInfo.name}`,
-      bonus: `+${levelMultiplier * 15} EcoPoints`,
-      description: `Target scaled to your verified experience: prevent ${levelMultiplier * 5} kg of verified carbon this term.`,
-      target: `${Math.min(levelMultiplier * 5, Math.round(studentCO2))} / ${levelMultiplier * 5} kg CO₂`,
-      icon: levelInfo.icon,
-    },
-    {
-      id: 'mission_comeback',
-      title: 'School Campus Steward',
-      tag: 'Campus Impact',
-      bonus: '+20 EcoPoints',
-      description: 'Help the school achieve the 500 kg rooftop solar milestone with a campus-based action.',
-      target: 'Campus grounds verified',
-      icon: '🏫',
+      reason: `Target scales with your ${levelInfo.name} level`,
+      bonus: levelMultiplier * 15, target: levelMultiplier * 5, progress: Math.round(studentCO2), complete: studentCO2 >= levelMultiplier * 5, claimed: false,
+      action_type: null,
     },
   ];
+
+  const displayMissions = missionsLoading
+    ? fallbackMissions
+    : liveMissions.length > 0 ? liveMissions : fallbackMissions;
 
   return (
     <div className="page-container gradient-mesh">
@@ -259,13 +279,29 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
           </span>
         </div>
 
+        {/* Claim error */}
+        {claimError && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: '8px',
+            padding: '10px 16px', marginBottom: '16px',
+            borderRadius: '10px', backgroundColor: '#fef2f2',
+            border: '1px solid #fecaca', color: '#b91c1c', fontSize: '0.85rem',
+          }}>
+            <AlertCircle size={16} />
+            <span>{claimError}</span>
+          </div>
+        )}
+
         <div style={{
           display: 'grid',
           gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
           gap: '20px',
         }}>
-          {adaptiveMissions.map((quest) => {
-            const isClaimed = completedQuests[quest.id];
+          {displayMissions.map((quest) => {
+            const meta    = KIND_META[quest.kind] || KIND_META.challenge;
+            const pct     = Math.min(100, Math.round((quest.progress / quest.target) * 100));
+            const isClaiming = claimingId === quest.id;
+
             return (
               <div
                 key={quest.id}
@@ -275,49 +311,91 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
                   display: 'flex',
                   flexDirection: 'column',
                   justifyContent: 'space-between',
-                  border: quest.isAdaptiveNudge ? '2px solid #10b981' : '1px solid #e2e8f0',
-                  background: quest.isAdaptiveNudge ? 'linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%)' : '#ffffff',
+                  border: meta.isHighlight ? '2px solid #10b981' : '1px solid #e2e8f0',
+                  background: meta.isHighlight ? 'linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%)' : '#ffffff',
+                  opacity: quest.claimed ? 0.72 : 1,
                 }}
               >
                 <div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
-                    <span style={{ fontSize: '2rem' }}>{quest.icon}</span>
-                    <span className="status-badge verified" style={{ fontSize: '0.8rem', fontWeight: 800 }}>
-                      {quest.bonus}
+                    <span style={{ fontSize: '2rem' }}>{meta.icon}</span>
+                    <span className={`status-badge ${quest.claimed ? 'review' : quest.complete ? 'verified' : 'pending'}`}
+                      style={{ fontSize: '0.78rem', fontWeight: 800 }}>
+                      {quest.claimed ? '✓ Claimed' : quest.complete ? '🎉 Complete!' : `+${quest.bonus} pts`}
                     </span>
                   </div>
 
                   <div style={{
-                    fontSize: '0.72rem',
-                    fontWeight: 800,
-                    textTransform: 'uppercase',
+                    fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase',
                     letterSpacing: '0.05em',
-                    color: quest.isAdaptiveNudge ? '#059669' : '#64748b',
+                    color: meta.isHighlight ? '#059669' : '#64748b',
                     marginBottom: '4px',
                   }}>
-                    {quest.tag}
+                    {missionsLoading ? 'Loading...' : meta.tag}
                   </div>
 
-                  <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#0f172a', marginBottom: '6px' }}>
+                  <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#0f172a', marginBottom: '6px' }}>
                     {quest.title}
                   </h3>
-                  <p style={{ fontSize: '0.84rem', color: '#475569', lineHeight: 1.5, marginBottom: '12px' }}>
-                    {quest.description}
+                  <p style={{ fontSize: '0.83rem', color: '#475569', lineHeight: 1.5, marginBottom: '14px' }}>
+                    {quest.reason}
                   </p>
+
+                  {/* Real progress bar from backend */}
+                  <div style={{ marginBottom: '4px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.76rem', color: '#64748b', marginBottom: '6px', fontWeight: 600 }}>
+                      <span>{quest.progress} / {quest.target} actions</span>
+                      <span>{pct}%</span>
+                    </div>
+                    <div style={{ height: '8px', borderRadius: '9999px', backgroundColor: '#e2e8f0', overflow: 'hidden' }}>
+                      <div style={{
+                        height: '100%',
+                        borderRadius: '9999px',
+                        background: quest.complete
+                          ? 'linear-gradient(90deg, #34d399, #10b981)'
+                          : 'linear-gradient(90deg, #06b6d4, #3b82f6)',
+                        width: `${pct}%`,
+                        transition: 'width 0.5s ease',
+                      }} />
+                    </div>
+                  </div>
                 </div>
 
-                <div style={{ marginTop: '16px' }}>
-                  <button
-                    onClick={() => {
-                      if (onNavigateUpload) onNavigateUpload();
-                      else setCompletedQuests({ ...completedQuests, [quest.id]: true });
-                    }}
-                    className="btn-primary"
-                    style={{ width: '100%', padding: '10px 14px', fontSize: '0.88rem' }}
-                  >
-                    <Target size={15} />
-                    Log Action for Quest
-                  </button>
+                <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  {/* Claim Bonus button — only shown when complete and not claimed */}
+                  {quest.complete && !quest.claimed && (
+                    <button
+                      onClick={() => handleClaim(quest.id)}
+                      disabled={isClaiming}
+                      className="btn-primary"
+                      style={{ width: '100%', padding: '10px 14px', fontSize: '0.88rem',
+                        background: 'linear-gradient(135deg, #f59e0b, #d97706)',
+                        opacity: isClaiming ? 0.7 : 1,
+                      }}
+                    >
+                      {isClaiming
+                        ? <><RefreshCw size={14} style={{ animation: 'spin 0.8s linear infinite' }} /> Claiming...</>
+                        : <><Gift size={14} /> Claim +{quest.bonus} Bonus Points!</>}
+                    </button>
+                  )}
+
+                  {/* Log Action button — shown when not yet complete */}
+                  {!quest.complete && (
+                    <button
+                      onClick={() => onNavigateUpload && onNavigateUpload()}
+                      className="btn-primary"
+                      style={{ width: '100%', padding: '10px 14px', fontSize: '0.88rem' }}
+                    >
+                      <Target size={15} />
+                      Log Action for Quest
+                    </button>
+                  )}
+
+                  {quest.claimed && (
+                    <div style={{ textAlign: 'center', fontSize: '0.82rem', color: '#059669', fontWeight: 700 }}>
+                      ✅ Bonus claimed — keep going!
+                    </div>
+                  )}
                 </div>
               </div>
             );

@@ -144,6 +144,31 @@ export async function apiStudentSummary(studentId) {
   return apiFetch(`/students/${studentId}/summary`);
 }
 
+// ── Mission Planner endpoints ──────────────────────────────────────────────────
+
+/**
+ * GET /my/missions — returns this week's adaptive missions with live progress.
+ * Each mission: { id, kind, action_type, target, bonus, title, reason, progress, complete, claimed }
+ */
+export async function apiMyMissions() {
+  return apiFetch('/my/missions');
+}
+
+/**
+ * POST /my/missions/{id}/claim — claim bonus points when mission is complete.
+ * Returns: { mission_id, bonus_awarded, points, level }
+ */
+export async function apiClaimMission(missionId) {
+  return apiFetch(`/my/missions/${missionId}/claim`, { method: 'POST' });
+}
+
+/**
+ * GET /missions/{student_id} — teacher/admin view of a student's missions.
+ */
+export async function apiStudentMissions(studentId) {
+  return apiFetch(`/missions/${studentId}`);
+}
+
 // ── School / Goal endpoints ────────────────────────────────────────────────────
 
 /** GET /schools/{id}/goal — current goal with progress */
