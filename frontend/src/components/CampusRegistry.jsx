@@ -10,9 +10,9 @@ export default function CampusRegistry({ submissions = [], onExportCSV }) {
 
   const filtered = submissions.filter((sub) => {
     const matchesSearch =
-      sub.student_name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      sub.id.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      sub.student_email.toLowerCase().includes(searchTerm.toLowerCase());
+      (sub.student_name || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (sub.id || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (sub.student_email || sub.student_id || '').toLowerCase().includes(searchTerm.toLowerCase());
 
     const matchesCategory = categoryFilter === 'all' || sub.activity === categoryFilter;
     const matchesStatus = statusFilter === 'all' || sub.status === statusFilter;

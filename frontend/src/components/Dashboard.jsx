@@ -1,35 +1,14 @@
 import React, { useState } from 'react';
 import {
-  PieChart,
-  Pie,
-  Cell,
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
+  PieChart, Pie, Cell, ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
 } from 'recharts';
 import {
-  PlusCircle,
-  CheckCircle,
-  Clock,
-  XCircle,
-  ShieldCheck,
-  Download,
-  Award,
-  Building2,
-  Flame,
-  Leaf,
-  Car,
-  Zap,
-  Sparkles,
-  ArrowRight,
-  Eye,
+  PlusCircle, CheckCircle, Clock, XCircle, ShieldCheck,
+  Download, Award, Building2, Flame, Leaf, Car, Zap, Sparkles, ArrowRight, Eye,
 } from 'lucide-react';
 import { EMISSION_FACTORS, REGISTERED_SCHOOL, getStudentLevel, SCHOOL_GOAL } from '../lib/constants';
+import { useStudentSummary, useSchoolGoal } from '../lib/api';
 
 const COLORS = ['#10b981', '#06b6d4', '#f59e0b', '#f97316', '#8b5cf6', '#ec4899'];
 
@@ -49,38 +28,55 @@ export default function Dashboard({
 }) {
   const [selectedPhoto, setSelectedPhoto] = useState(null);
 
-  // Student-specific metrics
-  const mySubmissions = submissions.filter(
-    (s) => s.student_email === user?.email || s.user_id === user?.id
-  );
+  // ── Live backend data (student summary + school goal) ──────────────────────
+  const summary  = useStudentSummary(user?.student_id);
+  const goalData = useSchoolGoal(user?.school_id);
+
+  // ── Student-specific metrics (from submissions prop, kept as fallback) ──────
+  // After backend integration GET /my/submissions already filters to this student
+  const mySubmissions = submissions;
   const myVerified = mySubmissions.filter((s) => s.status === 'verified');
-  const myPending = mySubmissions.filter((s) => s.status === 'review' || s.status === 'pending');
+  const myPending  = mySubmissions.filter((s) => s.status === 'review' || s.status === 'pending');
 
   const myCO2 = Number(
-    myVerified
-      .reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0)
-      .toFixed(2)
+    myVerified.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0).toFixed(2)
   );
-  const myVerifiedPoints = myVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
-  const myPendingPoints = myPending.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  // Use backend points if available; fall back to local sum
+  const myVerifiedPoints = summary.points || myVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  const myPendingPoints  = myPending.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
   const myVerifiedActions = myVerified.length;
 
-  // Gamification v2 Level (Seedling → Sapling → Tree → Grove → Forest)
-  const studentLevel = getStudentLevel(myVerifiedPoints);
+  // ── Level: backend wins, local getStudentLevel as fallback ─────────────────
+  const studentLevel = summary.loading
+    ? getStudentLevel(myVerifiedPoints)   // show something while loading
+    : {
+        level:           summary.level,
+        name:            summary.levelName,
+        icon:            summary.levelIcon,
+        progressPercent: summary.progressPercent,
+        nextLevelName:   summary.nextLevelName,
+        pointsToNext:    summary.pointsToNext,
+      };
 
-  // School Goal Centerpiece (500 kg CO2 target)
-  const schoolGoalTarget = SCHOOL_GOAL.targetKg;
-  const schoolGoalCurrent = Number(totalCO2.toFixed(1));
-  const schoolGoalPercent = Math.min(100, Math.round((schoolGoalCurrent / schoolGoalTarget) * 100));
+  // ── School Goal: backend wins, local totalCO2 as fallback ─────────────────
+  const schoolGoalTarget  = goalData.loading ? SCHOOL_GOAL.targetKg : goalData.targetKg;
+  const schoolGoalCurrent = goalData.loading ? Number(totalCO2.toFixed(1)) : goalData.currentKg;
+  const schoolGoalPercent = goalData.loading
+    ? Math.min(100, Math.round((schoolGoalCurrent / schoolGoalTarget) * 100))
+    : goalData.percent;
 
-  // Weekly Streaks (active 4 weeks in a row to avoid fake daily claims)
-  const activeWeeksCount = Math.min(4, Math.max(myVerified.length > 0 ? 1 : 0, Math.ceil(myVerified.length / 2)));
+  // ── Streak: use backend streak_weeks (real calendar weeks) ────────────────
+  const activeWeeksCount = summary.streakWeeks ||
+    Math.min(4, Math.max(myVerified.length > 0 ? 1 : 0, Math.ceil(myVerified.length / 2)));
   const streakWeeks = [
     { label: 'Week 1', active: activeWeeksCount >= 1 },
     { label: 'Week 2', active: activeWeeksCount >= 2 },
     { label: 'Week 3', active: activeWeeksCount >= 3 },
     { label: 'Week 4', active: activeWeeksCount >= 4 },
   ];
+
+  // ── CO2 from backend summary (more accurate than local sum) ───────────────
+  const displayCO2 = summary.co2_total > 0 ? summary.co2_total : myCO2;
 
   // Adaptive Mission Planner: Diversity nudge
   const categoriesDone = new Set(myVerified.map((s) => s.activity));
@@ -107,10 +103,10 @@ export default function Dashboard({
     };
   }
 
-  // Real world equivalents calculated from real CO2
-  const kmDrivingOffset = Math.round(myCO2 * 4.1);
-  const treesEquiv = Math.max(1, Math.round(myCO2 / 10));
-  const ledHoursEquiv = Math.round(myCO2 * 65);
+  // Real world equivalents — use backend co2_total when available
+  const kmDrivingOffset = Math.round(displayCO2 * 4.1);
+  const treesEquiv = Math.max(1, Math.round(displayCO2 / 10));
+  const ledHoursEquiv = Math.round(displayCO2 * 65);
 
   return (
     <div className="page-container gradient-mesh">
@@ -182,7 +178,7 @@ export default function Dashboard({
               💡 <strong>Impact Outcome:</strong> {SCHOOL_GOAL.outcome}
             </div>
             <div>
-              Your verified actions contributed <strong>{myCO2} kg</strong> toward our campus target!
+              Your verified actions contributed <strong>{displayCO2} kg</strong> toward our campus target!
             </div>
           </div>
         </div>
@@ -267,7 +263,7 @@ export default function Dashboard({
               </h1>
 
               <p style={{ fontSize: '1.02rem', color: '#475569', maxWidth: '620px', lineHeight: 1.6, marginBottom: '20px' }}>
-                You have verified <strong style={{ color: '#047857' }}>{myCO2} kg of CO₂</strong> reductions.
+                You have verified <strong style={{ color: '#047857' }}>{displayCO2} kg of CO₂</strong> reductions.
                 Your efforts help unlock solar power for {user?.school || REGISTERED_SCHOOL.name}!
               </p>
 
@@ -518,7 +514,7 @@ export default function Dashboard({
                 </div>
               </div>
               <div className="metric-value" style={{ color: '#059669' }}>
-                {myCO2} <span style={{ fontSize: '1.25rem', fontWeight: 600 }}>kg</span>
+                {displayCO2} <span style={{ fontSize: '1.25rem', fontWeight: 600 }}>kg</span>
               </div>
               <div className="metric-subtitle">
                 Real carbon prevented by your actions
@@ -542,7 +538,7 @@ export default function Dashboard({
                 </div>
               </div>
               <div className="metric-value" style={{ color: '#d97706' }}>
-                +{myPoints}
+                +{myVerifiedPoints}
               </div>
               <div className="metric-subtitle">
                 Earned from verified actions & carbon bonus

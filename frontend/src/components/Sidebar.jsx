@@ -1,26 +1,12 @@
 import React from 'react';
 import { useAuth } from '../lib/auth';
 import {
-  LayoutDashboard,
-  PlusCircle,
-  ShieldCheck,
-  Building2,
-  Award,
-  LogOut,
-  User,
-  GraduationCap,
-  Building,
-  HeartHandshake,
-  Lightbulb,
-  FileSpreadsheet,
-  Trophy,
-  Camera,
-  Calculator,
-  Flame,
-  Sparkles,
+  LayoutDashboard, PlusCircle, ShieldCheck, Building2, Award, LogOut, User,
+  GraduationCap, Building, HeartHandshake, Lightbulb, FileSpreadsheet,
+  Trophy, Camera, Calculator, Flame, Sparkles,
 } from 'lucide-react';
-
 import { getStudentLevel } from '../lib/constants';
+import { useStudentSummary } from '../lib/api';
 
 export default function Sidebar({
   activeTab,
@@ -33,15 +19,23 @@ export default function Sidebar({
   const { user, signOut } = useAuth();
   const role = currentRole || user?.role || 'student';
 
-  // Calculate live student level and badge progress (Gamification v2)
-  const myVerified = submissions.filter(
-    (s) => (s.student_email === user?.email || s.user_id === user?.id) && s.status === 'verified'
-  );
-  const myCO2 = myVerified.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0);
-  const myPoints = myVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
-  const myActions = myVerified.length;
-  const activeWeeks = Math.min(4, Math.floor(myActions / 2) || (myActions > 0 ? 1 : 0));
-  const levelInfo = getStudentLevel(myPoints);
+  // \u2500\u2500 Live gamification data from backend \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  const summary = useStudentSummary(role === 'student' ? user?.student_id : null);
+
+  // Fallback computed locally from submissions prop (used while summary loads)
+  const myVerified = submissions.filter((s) => s.status === 'verified');
+  const localPoints = myVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  const localCO2    = myVerified.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0);
+  const localActions = myVerified.length;
+
+  const myPoints  = summary.points  > 0 ? summary.points  : localPoints;
+  const myCO2     = summary.co2_total > 0 ? summary.co2_total : localCO2;
+  const myActions = summary.points  > 0 ? undefined : localActions; // unused but kept for consistency
+  const activeWeeks = summary.streakWeeks || Math.min(4, Math.floor(localActions / 2) || (localActions > 0 ? 1 : 0));
+
+  const levelInfo = summary.loading
+    ? getStudentLevel(localPoints)
+    : { level: summary.level, name: summary.levelName, icon: summary.levelIcon, progressPercent: summary.progressPercent };
 
   const getRoleBadge = () => {
     if (role === 'admin') {
