@@ -6,7 +6,7 @@ from typing import Literal
 from bson import ObjectId
 from bson.errors import InvalidId
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ from pymongo import MongoClient
 from gamification_agent import update_profile
 from impact_agent import estimate
 from pipeline import graph
+from auth import bearer
 
 load_dotenv()
 
@@ -37,7 +38,7 @@ try:
 except Exception:
     pass
 
-app = FastAPI(title="EcoMesh API")
+app = FastAPI(title="EcoMesh API", dependencies=[Depends(bearer)])
 
 app.add_middleware(
     CORSMiddleware,
@@ -116,6 +117,7 @@ def list_schools():
 # ---------- Submissions ----------
 @app.post("/submissions")
 def create_submission(
+    request: Request,
     student_id: str = Form(...),
     school_id: str = Form(...),
     action_type: ActionType = Form(...),
@@ -128,6 +130,12 @@ def create_submission(
 ):
     if photo.content_type not in ("image/jpeg", "image/png"):
         raise HTTPException(status_code=400, detail="Photo must be JPEG or PNG")
+
+    # Students can only submit as themselves, whatever the form says
+    user = getattr(request.state, "user", None)
+    if user and user["role"] == "student":
+        student_id = user["student_id"]
+        school_id = user["school_id"]
 
     ext = ".png" if photo.content_type == "image/png" else ".jpg"
     filename = uuid.uuid4().hex + ext
@@ -148,13 +156,6 @@ def create_submission(
     }
     result = submissions.insert_one(doc)
     return {"id": str(result.inserted_id), "status": "pending"}
-
-
-@app.get("/submissions")
-def list_submissions(limit: int = 20, status: str | None = None):
-    query = {"status": status} if status else {}
-    return [clean(d) for d in submissions.find(query).sort("created_at", -1).limit(limit)]
-
 
 # ---------- Pipeline ----------
 @app.post("/pipeline/run")
@@ -406,3 +407,142 @@ def get_school_goal(school_id: str):
         "reached": achieved >= goal["target_kg"],
     }
 
+# ---------- Auth & roles ----------
+from fastapi import Depends
+from fastapi.responses import JSONResponse
+from auth import check_password, decode_token, get_current_user, hash_password, make_token
+
+users = db["users"]
+
+# (method, path prefix, allowed roles). First match wins. Unlisted routes are public.
+ROLE_RULES = [
+    ("POST", "/auth/users", {"admin"}),
+    ("POST", "/submissions", {"student", "teacher", "admin"}),
+    ("GET", "/submissions", {"teacher", "admin"}),
+    ("GET", "/my", {"student"}),
+    ("POST", "/pipeline", {"teacher", "admin"}),
+    ("GET", "/review", {"teacher", "admin"}),
+    ("POST", "/review", {"teacher", "admin"}),
+    ("POST", "/students/register", {"teacher", "admin"}),
+    ("POST", "/schools", {"admin"}),
+    ("POST", "/benefit", {"admin"}),
+    ("GET", "/benefit", {"teacher", "admin"}),
+]
+
+
+@app.middleware("http")
+async def role_guard(request: Request, call_next):
+    for method, prefix, roles in ROLE_RULES:
+        if request.method == method and request.url.path.startswith(prefix):
+            header = request.headers.get("authorization", "")
+            user = decode_token(header[7:]) if header.lower().startswith("bearer ") else None
+            origin = request.headers.get("origin")
+            cors = {"Access-Control-Allow-Origin": origin, "Vary": "Origin"} if origin else {}
+            if user is None:
+                return JSONResponse({"detail": "Login required"}, status_code=401, headers=cors)
+            if user["role"] not in roles:
+                return JSONResponse({"detail": f"Not allowed for role {user['role']}"}, status_code=403, headers=cors)
+            request.state.user = user
+            break
+    return await call_next(request)
+
+
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
+class SignupIn(BaseModel):
+    username: str = Field(min_length=3, max_length=60)
+    password: str = Field(min_length=6, max_length=64)
+    name: str
+    school_id: str
+    class_name: str
+    house: str = ""
+
+
+
+class UserCreateIn(BaseModel):
+    username: str = Field(min_length=3, max_length=60)
+    password: str = Field(min_length=6, max_length=64)
+    role: Literal["teacher", "admin"]
+    school_id: str
+
+
+@app.post("/auth/bootstrap-admin")
+def bootstrap_admin(body: LoginIn):
+    """Creates the first admin. Works only while no admin exists."""
+    if users.count_documents({"role": "admin"}) > 0:
+        raise HTTPException(status_code=403, detail="An admin already exists")
+    users.insert_one({
+        "_id": body.username,
+        "password_hash": hash_password(body.password),
+        "role": "admin",
+        "school_id": None,
+        "created_at": datetime.now(timezone.utc),
+    })
+    return {"created": body.username, "role": "admin"}
+
+
+@app.post("/auth/signup")
+def signup(body: SignupIn):
+    if users.find_one({"_id": body.username}):
+        raise HTTPException(status_code=409, detail="Username already taken")
+    student_id = body.username
+    if users.find_one({"student_id": student_id}):
+        raise HTTPException(status_code=409, detail="This student ID already has an account")
+    register_student(StudentIn(
+        student_id=student_id, name=body.name, school_id=body.school_id,
+        class_name=body.class_name, house=body.house,
+    ))
+    users.insert_one({
+        "_id": body.username,
+        "password_hash": hash_password(body.password),
+        "role": "student",
+        "school_id": body.school_id,
+        "student_id": student_id,
+        "created_at": datetime.now(timezone.utc),
+    })
+    return {"username": body.username, "student_id": student_id, "role": "student"}
+
+
+@app.post("/auth/login")
+def login(body: LoginIn):
+    u = users.find_one({"_id": body.username})
+    if u is None or not check_password(body.password, u["password_hash"]):
+        raise HTTPException(status_code=401, detail="Wrong username or password")
+    return {
+        "access_token": make_token(u),
+        "token_type": "bearer",
+        "role": u["role"],
+        "school_id": u.get("school_id"),
+        "student_id": u.get("student_id"),
+    }
+
+
+@app.get("/auth/me")
+def me(user: dict = Depends(get_current_user)):
+    return user
+
+
+@app.post("/auth/users")
+def create_user(body: UserCreateIn):
+    if schools.find_one({"_id": body.school_id}) is None:
+        raise HTTPException(status_code=404, detail="Unknown school")
+    if users.find_one({"_id": body.username}):
+        raise HTTPException(status_code=409, detail="Username already taken")
+    users.insert_one({
+        "_id": body.username,
+        "password_hash": hash_password(body.password),
+        "role": body.role,
+        "school_id": body.school_id,
+        "created_at": datetime.now(timezone.utc),
+    })
+    return {"username": body.username, "role": body.role}
+
+
+@app.get("/my/submissions")
+def my_submissions(request: Request, limit: int = 20):
+    user = request.state.user
+    cursor = submissions.find({"student_id": user["student_id"]}).sort("created_at", -1).limit(limit)
+    return [clean(d) for d in cursor]
