@@ -546,3 +546,8 @@ def my_submissions(request: Request, limit: int = 20):
     user = request.state.user
     cursor = submissions.find({"student_id": user["student_id"]}).sort("created_at", -1).limit(limit)
     return [clean(d) for d in cursor]
+
+@app.get("/impact/factors")
+def impact_factors():
+    from impact_agent import FACTORS
+    return FACTORS

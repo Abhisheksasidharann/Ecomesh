@@ -1,13 +1,38 @@
-﻿# Emission factors: kg CO2e per unit.
-# PLACEHOLDER VALUES. Before your final review, replace each one with a
-# figure from a cited source (IPCC AR6, India CEA grid factor, etc.)
-# and fill in the "source" field.
+﻿# Emission factors: kg CO2e per unit of verified action.
+# Each factor carries its basis and source so reports are auditable.
 FACTORS = {
-    "plantation": {"unit": "sapling", "factor": 10.0, "source": "TODO cite"},
-    "waste_segregation": {"unit": "kg waste", "factor": 0.5, "source": "TODO cite"},
-    "sustainable_transport": {"unit": "km", "factor": 0.17, "source": "TODO cite"},
-    "solar_adoption": {"unit": "kWh", "factor": 0.71, "source": "TODO cite"},
-    "water_conservation": {"unit": "litre", "factor": 0.0003, "source": "TODO cite"},
+    "plantation": {
+        "unit": "sapling",
+        "factor": 12.0,
+        "basis": "First-year CO2 uptake of a young tree, credited once per sapling "
+                 "(conservative; typical range 10-40 kg/tree/yr)",
+        "source": "Arbor Environmental Alliance young-tree estimate (~12 kg CO2/yr); range per EcoTree",
+    },
+    "waste_segregation": {
+        "unit": "kg organic waste",
+        "factor": 0.31,
+        "basis": "Avoided emissions: best-case landfill (~470 kg CO2e/t) vs home composting (~160 kg CO2e/t)",
+        "source": "Vergara et al. via The Naked Scientists; see Perez, Vergara & Silver (2023), Sci Rep 13:7608",
+    },
+    "sustainable_transport": {
+        "unit": "km",
+        "factor": 0.13,
+        "basis": "Petrol car (2.232 kg CO2e/l at assumed 15 km/l = 0.149 kg/km) minus city bus (0.0152 kg/pax-km)",
+        "source": "Smart Freight Centre India, India Default GHG Emission Values v1.0 (2025, AR6); "
+                  "India GHG Program, India Specific Road Transport Emission Factors (2015)",
+    },
+    "solar_adoption": {
+        "unit": "kWh",
+        "factor": 0.727,
+        "basis": "Solar kWh displaces grid electricity at the national weighted-average factor",
+        "source": "CEA CO2 Baseline Database v20.0 (Dec 2024), FY2023-24 weighted average incl. RE",
+    },
+    "water_conservation": {
+        "unit": "litre",
+        "factor": 0.0003,
+        "basis": "PLACEHOLDER: energy for water pumping/treatment not yet sourced",
+        "source": "UNVERIFIED - replace before citing",
+    },
 }
 
 
@@ -17,5 +42,5 @@ def estimate(action_type, quantity):
     if f is None:
         return 0.0, "Unknown action type"
     kg = round(max(quantity, 0) * f["factor"], 3)
-    note = f"{quantity} {f['unit']} x {f['factor']} kg CO2e/{f['unit']}"
+    note = f"{quantity} {f['unit']} x {f['factor']} kg CO2e/{f['unit']} ({f['source']})"
     return kg, note
