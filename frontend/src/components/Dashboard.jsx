@@ -28,7 +28,6 @@ import {
   Sparkles,
   ArrowRight,
   Eye,
-  Sun,
 } from 'lucide-react';
 import { EMISSION_FACTORS, REGISTERED_SCHOOL, getStudentLevel, SCHOOL_GOAL } from '../lib/constants';
 
@@ -64,7 +63,6 @@ export default function Dashboard({
   );
   const myVerifiedPoints = myVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
   const myPendingPoints = myPending.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
-  const myPoints = myVerifiedPoints;
   const myVerifiedActions = myVerified.length;
 
   // Gamification v2 Level (Seedling → Sapling → Tree → Grove → Forest)
