@@ -234,9 +234,10 @@ def review_submission(submission_id: str, body: ReviewIn):
 
     kg, method = estimate(s["action_type"], s.get("quantity", 1.0))
     profile, points, badges = update_profile(
-        students.find_one({"_id": s["student_id"]}),
-        kg,
-        s["action_type"],
+          students.find_one({"_id": s["student_id"]}),
+          kg,
+          s["captured_at"].date().isoformat(),
+          s["action_type"],
     )
     update.update({
         "status": "verified",
@@ -551,3 +552,84 @@ def my_submissions(request: Request, limit: int = 20):
 def impact_factors():
     from impact_agent import FACTORS
     return FACTORS
+
+# ---------- Mission Planner ----------
+from gamification_agent import week_start
+from mission_agent import plan_missions
+
+missions_col = db["missions"]
+ROLE_RULES.append(("POST", "/my", {"student"}))
+ROLE_RULES.append(("GET", "/missions", {"teacher", "admin"}))
+
+
+def week_missions(student_id):
+    today = datetime.now(timezone.utc).date()
+    week = week_start(today)
+    key = f"{student_id}:{week.isoformat()}"
+    doc = missions_col.find_one({"_id": key})
+    if doc is None:
+        history = {
+            r["_id"]: r["n"]
+            for r in submissions.aggregate([
+                {"$match": {"student_id": student_id, "status": "verified"}},
+                {"$group": {"_id": "$action_type", "n": {"$sum": 1}}},
+            ])
+        }
+        doc = {
+            "_id": key,
+            "student_id": student_id,
+            "week_start": week.isoformat(),
+            "missions": plan_missions(students.find_one({"_id": student_id}), history, today),
+            "claimed": [],
+        }
+        missions_col.insert_one(doc)
+
+    start = datetime.combine(week, datetime.min.time())
+    this_week = {
+        r["_id"]: r["n"]
+        for r in submissions.aggregate([
+            {"$match": {"student_id": student_id, "status": "verified", "captured_at": {"$gte": start}}},
+            {"$group": {"_id": "$action_type", "n": {"$sum": 1}}},
+        ])
+    }
+    total = sum(this_week.values())
+    out = []
+    for m in doc["missions"]:
+        progress = total if m["action_type"] is None else this_week.get(m["action_type"], 0)
+        out.append({
+            **m,
+            "progress": min(progress, m["target"]),
+            "complete": progress >= m["target"],
+            "claimed": m["id"] in doc["claimed"],
+        })
+    return doc, out
+
+
+@app.get("/my/missions")
+def my_missions(request: Request):
+    _, missions = week_missions(request.state.user["student_id"])
+    return missions
+
+
+@app.post("/my/missions/{mission_id}/claim")
+def claim_mission(mission_id: str, request: Request):
+    student_id = request.state.user["student_id"]
+    doc, missions = week_missions(student_id)
+    m = next((x for x in missions if x["id"] == mission_id), None)
+    if m is None:
+        raise HTTPException(status_code=404, detail="Mission not found for this week")
+    if m["claimed"]:
+        raise HTTPException(status_code=409, detail="Bonus already claimed")
+    if not m["complete"]:
+        raise HTTPException(status_code=400, detail=f"Mission not complete ({m['progress']}/{m['target']})")
+    missions_col.update_one({"_id": doc["_id"]}, {"$push": {"claimed": mission_id}})
+    students.update_one({"_id": student_id}, {"$inc": {"points": m["bonus"]}}, upsert=True)
+    pts = students.find_one({"_id": student_id}).get("points", 0)
+    students.update_one({"_id": student_id}, {"$set": {"level": level_for(pts)}})
+    return {"mission_id": mission_id, "bonus_awarded": m["bonus"], "points": pts, "level": level_for(pts)}
+
+
+@app.get("/missions/{student_id}")
+def student_missions(student_id: str):
+    _, missions = week_missions(student_id)
+    return missions
