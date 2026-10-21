@@ -170,7 +170,7 @@ export default function UploadAction({ onSubmissionAdded, onCancel }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!file || !photoHash) {
+    if (!file) {
       setError('Please provide a camera photo of your green activity as proof.');
       return;
     }
@@ -194,9 +194,8 @@ export default function UploadAction({ onSubmissionAdded, onCancel }) {
         locationType,
         latitude,
         longitude,
-        photoHash,
-        photoUrl,
-        note,
+        // Pass the actual File object — the backend needs multipart upload
+        file,
         capturedTime,
       });
       setSuccess(true);
@@ -206,6 +205,7 @@ export default function UploadAction({ onSubmissionAdded, onCancel }) {
       setSubmitting(false);
     }
   };
+
 
   if (success) {
     return (

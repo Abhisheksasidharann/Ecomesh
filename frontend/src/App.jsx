@@ -19,6 +19,8 @@ export default function App() {
   const { user, loading: authLoading, isAuthenticated } = useAuth();
   const [activeTab, setActiveTab] = useState('dashboard');
 
+  const role = user?.role || 'student';
+
   const {
     submissions,
     verifiedOnly,
@@ -31,7 +33,8 @@ export default function App() {
     addSubmission,
     reviewSubmission,
     exportComplianceCSV,
-  } = useSubmissions();
+    refreshSubmissions,
+  } = useSubmissions(role);
 
   if (authLoading) {
     return (
@@ -66,7 +69,7 @@ export default function App() {
     return <AuthPage onAuthSuccess={() => setActiveTab('dashboard')} />;
   }
 
-  const role = user?.role || 'student';
+  // role is declared above, near useSubmissions
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex' }}>
@@ -121,7 +124,6 @@ export default function App() {
         {/* 4. Campus Leaderboard (STUDENT ONLY) */}
         {activeTab === 'leaderboard' && role === 'student' && (
           <Leaderboard
-            submissions={submissions}
             totalCO2={totalCO2}
           />
         )}
@@ -131,6 +133,7 @@ export default function App() {
           <MyHistory
             submissions={submissions}
             onNavigateUpload={() => setActiveTab('upload')}
+            onRefresh={refreshSubmissions}
           />
         )}
 
@@ -162,7 +165,7 @@ export default function App() {
         )}
 
         {/* 8. Teacher Review Desk (TEACHER / ADMIN ONLY) */}
-        {activeTab === 'admin' && role === 'admin' && (
+        {activeTab === 'admin' && (role === 'admin' || role === 'teacher') && (
           <AdminReview
             reviewOnly={reviewOnly}
             onReviewAction={reviewSubmission}

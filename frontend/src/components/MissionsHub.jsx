@@ -1,83 +1,79 @@
 import React, { useState } from 'react';
 import { useAuth } from '../lib/auth';
+import { BADGE_DEFINITIONS_V2, getStudentLevel, EMISSION_FACTORS } from '../lib/constants';
+import { useStudentSummary } from '../lib/api';
 import {
-  BADGE_DEFINITIONS_V2,
-  getStudentLevel,
-  EMISSION_FACTORS,
-} from '../lib/constants';
-import {
-  Trophy,
-  Flame,
-  CheckCircle2,
-  Target,
-  Sparkles,
-  ArrowRight,
-  Zap,
-  Leaf,
-  Shield,
-  Compass,
+  Trophy, Flame, CheckCircle2, Target, Sparkles, ArrowRight, Zap, Leaf, Shield, Compass,
 } from 'lucide-react';
 
 export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavigateUpload }) {
   const { user } = useAuth();
   const [completedQuests, setCompletedQuests] = useState({});
 
-  // Filter actions for current student
-  const studentActions = verifiedOnly.filter(
-    (s) => s.student_email === user?.email || s.user_id === user?.id
-  );
+  // ── Live backend summary (real points, level, streak, earned badges) ──────
+  const summary = useStudentSummary(user?.student_id);
 
-  const studentCO2 = studentActions.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0);
-  const studentVerifiedPoints = studentActions.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  // ── Local submission data (fallback when summary still loading) ─────────
+  // GET /my/submissions already scoped to this student — no filter needed
+  const studentActions = verifiedOnly;
 
-  // Student Level Progression
-  const levelInfo = getStudentLevel(studentVerifiedPoints);
+  const studentCO2 = summary.co2_total > 0
+    ? summary.co2_total
+    : studentActions.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0);
 
-  // Set of activity types completed by student
+  const studentVerifiedPoints = summary.points > 0
+    ? summary.points
+    : studentActions.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+
+  // Student Level: backend wins, local fallback while loading
+  const levelInfo = summary.loading
+    ? getStudentLevel(studentVerifiedPoints)
+    : {
+        level:           summary.level,
+        name:            summary.levelName,
+        icon:            summary.levelIcon,
+        progressPercent: summary.progressPercent,
+        nextLevelName:   summary.nextLevelName,
+        pointsToNext:    summary.pointsToNext,
+      };
+
+  // Streak from backend (real calendar weeks), not action count
+  const realStreakWeeks = summary.streakWeeks;
+
+  // Set of activity types completed (from local submissions)
   const completedCategories = new Set(studentActions.map((s) => s.activity));
   const allCategories = ['plantation', 'waste', 'transport', 'solar', 'water'];
   const untriedCategories = allCategories.filter((cat) => !completedCategories.has(cat));
 
-  // Determine Badge Unlocks
+  // Backend returns earned badge IDs in summary.badges (e.g. ["first_tree", "co2_10kg"])
+  const earnedBadgeIds = new Set(summary.badges || []);
+
+  // Determine Badge Unlocks: check backend list first, fall back to local logic
   const getBadgeStatus = (badge) => {
+    // If backend says it's earned, trust it
+    if (earnedBadgeIds.has(badge.id)) {
+      return { unlocked: true, current: 1, target: 1, unit: '' };
+    }
+    // Otherwise compute locally
     if (badge.type === 'category') {
       const count = studentActions.filter((s) => s.activity === badge.category).length;
-      return {
-        unlocked: count >= 1,
-        current: count,
-        target: 1,
-        unit: 'action',
-      };
+      return { unlocked: count >= 1, current: count, target: 1, unit: 'action' };
     }
     if (badge.type === 'diversity') {
       const count = completedCategories.size;
-      return {
-        unlocked: count >= 5,
-        current: count,
-        target: 5,
-        unit: 'categories',
-      };
+      return { unlocked: count >= 5, current: count, target: 5, unit: 'categories' };
     }
     if (badge.type === 'streak') {
-      // Weekly streak check based on weeks
       const targetWeeks = badge.id === 'streak_2wk' ? 2 : 4;
-      // Calculate active weeks (approximated by unique calendar weeks or verified action milestones)
-      const currentWeeks = Math.min(targetWeeks, Math.floor(studentActions.length / 2) || (studentActions.length > 0 ? 1 : 0));
-      return {
-        unlocked: currentWeeks >= targetWeeks,
-        current: currentWeeks,
-        target: targetWeeks,
-        unit: 'weeks active',
-      };
+      // Prefer real backend streak weeks
+      const currentWeeks = realStreakWeeks > 0
+        ? Math.min(realStreakWeeks, targetWeeks)
+        : Math.min(targetWeeks, Math.floor(studentActions.length / 2) || (studentActions.length > 0 ? 1 : 0));
+      return { unlocked: currentWeeks >= targetWeeks, current: currentWeeks, target: targetWeeks, unit: 'weeks active' };
     }
     if (badge.type === 'co2') {
       const co2 = Math.round(studentCO2);
-      return {
-        unlocked: co2 >= badge.threshold,
-        current: co2,
-        target: badge.threshold,
-        unit: 'kg CO₂',
-      };
+      return { unlocked: co2 >= badge.threshold, current: co2, target: badge.threshold, unit: 'kg CO₂' };
     }
     return { unlocked: false, current: 0, target: 1, unit: '' };
   };
@@ -110,7 +106,9 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
       tag: 'Weekly Streak Quest',
       bonus: '+30 EcoPoints',
       description: 'Submit at least 2 verified green actions on campus grounds this week.',
-      target: `${Math.min(2, studentActions.length)} / 2 actions completed`,
+      target: realStreakWeeks > 0
+        ? `${realStreakWeeks} week streak active 🔥`
+        : `${Math.min(2, studentActions.length)} / 2 actions completed`,
       icon: '🔥',
     },
     {

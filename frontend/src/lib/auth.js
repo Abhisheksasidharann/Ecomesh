@@ -1,146 +1,172 @@
-import { useState, useEffect } from 'react';
-import { supabase } from './supabaseClient';
+import { useState, useEffect, useCallback } from 'react';
+import {
+  apiLogin,
+  apiSignup,
+  apiMe,
+  saveToken,
+  getToken,
+  clearToken,
+} from './api';
+import { DEFAULT_SCHOOL_ID } from './constants';
 
-export async function signUp({
-  email,
-  password,
-  name,
-  role = 'student',
-  school = 'Model Higher Secondary School',
-  studentClass = 'Class 11-A',
-  studentHouse = 'Terra House',
-}) {
-  const cleanEmail = email.toLowerCase().trim();
-  
-  const { data: authData, error: authError } = await supabase.auth.signUp({
-    email: cleanEmail,
-    password,
-    options: {
-      data: {
-        name,
-        role,
-        school,
-        studentClass,
-        studentHouse,
-      },
-    },
-  });
-
-  if (authError) throw authError;
-
-  if (authData.user) {
-    const { error: profileError } = await supabase.from('profiles').upsert({
-      id: authData.user.id,
-      name,
-      email: cleanEmail,
-      role,
-      school,
-    });
-    if (profileError) console.error('Profile creation error:', profileError);
+// ── Token decode (no library needed; JWT payload is plain base64) ─────────────
+function decodeToken(token) {
+  try {
+    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(b64));
+  } catch {
+    return null;
   }
-
-  return authData;
 }
 
-export async function signIn(email, password) {
-  const cleanEmail = email.toLowerCase().trim();
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: cleanEmail,
-    password,
-  });
+function isExpired(payload) {
+  if (!payload?.exp) return true;
+  // exp is in seconds; add a 10-second buffer
+  return Date.now() / 1000 > payload.exp - 10;
+}
 
-  if (error) throw error;
+// ── Public auth functions ──────────────────────────────────────────────────────
+
+/**
+ * Sign up a new student account.
+ * username = their chosen username (used as student_id in the backend)
+ */
+export async function signUp({
+  username,
+  password,
+  name,
+  school_id = DEFAULT_SCHOOL_ID,
+  studentClass = '10A',
+  studentHouse = '',
+}) {
+  const data = await apiSignup({
+    username,
+    password,
+    name,
+    school_id,
+    class_name: studentClass,
+    house: studentHouse,
+  });
+  return data; // { username, student_id, role }
+}
+
+/**
+ * Sign in and save JWT to localStorage.
+ * Returns the raw login response: { access_token, role, school_id, student_id }
+ */
+export async function signIn(username, password) {
+  const data = await apiLogin({ username, password });
+  saveToken(data.access_token);
   return data;
 }
 
-export async function signOut() {
-  const { error } = await supabase.auth.signOut();
-  if (error) throw error;
+/** Sign out — just clear the local token. No backend call needed. */
+export function signOut() {
+  clearToken();
 }
 
+// ── useAuth hook ──────────────────────────────────────────────────────────────
+/**
+ * Drop-in replacement for the Supabase useAuth hook.
+ * Reads the JWT from localStorage, validates it, and if valid fetches /auth/me
+ * to get the full user object.
+ *
+ * Returned `user` shape:
+ *  {
+ *    username, role, school_id, student_id,
+ *    name, studentClass, studentHouse,
+ *    // convenience aliases
+ *    id: student_id,
+ *    email: username,
+ *  }
+ */
 export function useAuth() {
   const [user, setUser] = useState(null);
-  const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        setUser(session.user);
-        loadUserProfile(session.user.id, session.user.user_metadata);
-      } else {
-        setUser(null);
-        setProfile(null);
-        setLoading(false);
-      }
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        setUser(session.user);
-        await loadUserProfile(session.user.id, session.user.user_metadata);
-      } else {
-        setUser(null);
-        setProfile(null);
-      }
+  const loadUser = useCallback(async () => {
+    const token = getToken();
+    if (!token) {
+      setUser(null);
       setLoading(false);
-    });
+      return;
+    }
 
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
+    const payload = decodeToken(token);
+    if (!payload || isExpired(payload)) {
+      clearToken();
+      setUser(null);
+      setLoading(false);
+      return;
+    }
 
-  const loadUserProfile = async (userId, metadata = {}) => {
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .single();
-
-      if (data && !error) {
-        setProfile(data);
-      } else {
-        setProfile({
-          id: userId,
-          name: metadata?.name || 'Verified User',
-          email: metadata?.email || user?.email,
-          role: metadata?.role || 'student',
-          school: metadata?.school || 'Model Higher Secondary School',
-        });
-      }
+      // /auth/me returns { username, role, school_id, student_id }
+      const me = await apiMe();
+      setUser(buildUser(me));
     } catch {
-      setProfile({
-        id: userId,
-        name: metadata?.name || 'Verified User',
-        email: metadata?.email || user?.email,
-        role: metadata?.role || 'student',
-        school: metadata?.school || 'Model Higher Secondary School',
-      });
+      // Token rejected by server (revoked, tampered, etc.)
+      clearToken();
+      setUser(null);
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    loadUser();
+  }, [loadUser]);
+
+  // Expose a refreshUser so other components can call it after login
+  const refreshUser = loadUser;
+
+  const handleSignIn = async (username, password) => {
+    await signIn(username, password);
+    await loadUser();
   };
 
-  const activeUser = user
-    ? {
-        ...user,
-        name: profile?.name || user.user_metadata?.name || user.email?.split('@')[0],
-        role: profile?.role || user.user_metadata?.role || 'student',
-        school: profile?.school || user.user_metadata?.school || 'Model Higher Secondary School',
-        studentClass: profile?.student_class || user.user_metadata?.studentClass || 'Class 11-A',
-        studentHouse: profile?.student_house || user.user_metadata?.studentHouse || 'Terra House',
-      }
-    : null;
+  const handleSignOut = () => {
+    signOut();
+    setUser(null);
+  };
 
   return {
-    user: activeUser,
-    profile,
+    user,
     loading,
     isAuthenticated: !!user,
-    signIn,
+    signIn: handleSignIn,
     signUp,
-    signOut,
+    signOut: handleSignOut,
+    refreshUser,
+    // Legacy alias so components that still read profile work
+    profile: user,
+  };
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Shape the raw /auth/me payload into the richer user object the
+ * rest of the app expects.
+ */
+function buildUser(me) {
+  return {
+    // Backend fields
+    username: me.username,
+    role: me.role,
+    school_id: me.school_id || DEFAULT_SCHOOL_ID,
+    student_id: me.student_id || me.username,
+
+    // Convenience aliases used across components
+    id: me.student_id || me.username,
+    email: me.username,                         // some components still read user.email
+    name: me.name || me.username,
+
+    // Class & house come from /students/{id}/summary; seeded with defaults here.
+    // App.jsx or Dashboard can overwrite these once the student summary loads.
+    studentClass: me.class_name || me.studentClass || '',
+    studentHouse: me.house || me.studentHouse || '',
+    student_class: me.class_name || me.studentClass || '',
+    student_house: me.house || me.studentHouse || '',
   };
 }

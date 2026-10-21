@@ -1,19 +1,86 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from '../lib/auth';
 import { Trophy, Shield, Sun, Users, Award, Sparkles, Building, ChevronRight } from 'lucide-react';
-import { REGISTERED_SCHOOL, SCHOOL_HOUSES, SCHOOL_CLASSES, SCHOOL_GOAL } from '../lib/constants';
+import { REGISTERED_SCHOOL, SCHOOL_HOUSES, SCHOOL_CLASSES, SCHOOL_GOAL, DEFAULT_SCHOOL_ID } from '../lib/constants';
+import { apiLeaderboard, apiSchoolImpact } from '../lib/api';
 
-export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
+export default function Leaderboard({ totalCO2 = 0 }) {
   const { user } = useAuth();
-  const [activeView, setActiveView] = useState('houses'); // 'houses' | 'classes' | 'my-class'
+  const [activeView, setActiveView] = useState('houses');
 
-  // Filter only verified submissions
-  const verified = submissions.filter((s) => s.status === 'verified');
+  // ── Live data from backend leaderboard endpoint ──────────────────────────
+  const [houseData, setHouseData]   = useState([]);
+  const [classData, setClassData]   = useState([]);
+  const [studentData, setStudentData] = useState([]);
+  const [schoolCO2, setSchoolCO2]   = useState(totalCO2);
+  const [loadingBoard, setLoadingBoard] = useState(true);
 
-  const userClass = user?.student_class || user?.class || 'Class 11-A';
-  const userHouseId = (user?.student_house || user?.house || 'terra').toLowerCase();
+  const schoolId = user?.school_id || DEFAULT_SCHOOL_ID;
 
-  // Helper: Mask name for minor child safety (e.g. "Abhishek Sasidharan" -> "Abhishek S.")
+  useEffect(() => {
+    async function loadAll() {
+      setLoadingBoard(true);
+      try {
+        const [houses, classes, students, impact] = await Promise.all([
+          apiLeaderboard(schoolId, 'house', 20).catch(() => []),
+          apiLeaderboard(schoolId, 'class', 20).catch(() => []),
+          apiLeaderboard(schoolId, 'student', 30).catch(() => []),
+          apiSchoolImpact(schoolId).catch(() => null),
+        ]);
+
+        // Map backend house rows → the shape the UI expects
+        const houseRows = SCHOOL_HOUSES.map((h) => {
+          // Backend returns { house: "Green", points, kg_co2e, students }
+          const row = houses.find(
+            (r) => (r.house || '').toLowerCase() === h.id ||
+                   (r.house || '').toLowerCase() === h.name.toLowerCase()
+          ) || {};
+          return {
+            ...h,
+            co2: Number((row.kg_co2e || 0).toFixed(1)),
+            points: row.points || 0,
+            actionsCount: row.actions || 0,
+            studentCount: row.students || 0,
+          };
+        }).sort((a, b) => b.co2 - a.co2);
+
+        // Map backend class rows → UI shape
+        const classRows = classes.map((r) => ({
+          name: r.class_name || r.class || r._id || 'Unknown',
+          co2: Number((r.kg_co2e || 0).toFixed(1)),
+          points: r.points || 0,
+          actionsCount: r.actions || 0,
+          studentCount: r.students || 0,
+        })).sort((a, b) => b.co2 - a.co2);
+
+        // Student rows (already ranked by backend)
+        const studentRows = students.map((r, idx) => ({
+          rank: r.rank || idx + 1,
+          name: r.name || 'Student',
+          safeName: formatSafeName(r.name || 'Student'),
+          class_name: r.class_name || '',
+          co2: Number((r.kg_co2e || 0).toFixed(1)),
+          points: r.points || 0,
+          level: r.level || 'Seedling',
+        }));
+
+        setHouseData(houseRows);
+        setClassData(classRows);
+        setStudentData(studentRows);
+        if (impact) setSchoolCO2(impact.total_kg_co2e || 0);
+      } catch (err) {
+        console.error('Leaderboard load error:', err);
+      } finally {
+        setLoadingBoard(false);
+      }
+    }
+    loadAll();
+  }, [schoolId]);
+
+  const userClass    = user?.studentClass || user?.student_class || '';
+  const userHouseId  = (user?.studentHouse || user?.student_house || '').toLowerCase().split(' ')[0];
+
+  // Helper: Mask name for minor child safety (e.g. "Abhishek Sasidharan" → "Abhishek S.")
   const formatSafeName = (fullName) => {
     if (!fullName) return 'Student';
     const parts = fullName.trim().split(' ');
@@ -21,92 +88,18 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
     return `${parts[0]} ${parts[parts.length - 1][0]}.`;
   };
 
-  // 1. Calculate House Standings
-  const houseData = SCHOOL_HOUSES.map((h) => {
-    const houseSubs = verified.filter(
-      (s) => (s.student_house || '').toLowerCase() === h.id || (s.house || '').toLowerCase() === h.id
-    );
-    const co2 = houseSubs.reduce((sum, s) => sum + (Number(s.co2_saved) || 0), 0);
-    const points = houseSubs.reduce((sum, s) => sum + (Number(s.points) || 0), 0);
-    const studentCount = new Set(houseSubs.map((s) => s.student_email || s.user_id)).size;
+  // My class students for the "My Class" tab (scoped from student list)
+  const myClassStudents = studentData
+    .filter((s) => s.class_name === userClass)
+    .map((s, idx) => ({ ...s, rank: idx + 1 }));
 
-    return {
-      ...h,
-      co2: Number(co2.toFixed(1)),
-      points,
-      actionsCount: houseSubs.length,
-      studentCount,
-    };
-  }).sort((a, b) => b.co2 - a.co2);
-
-  // 2. Calculate Class Standings
-  const classData = SCHOOL_CLASSES.map((cls) => {
-    const classSubs = verified.filter(
-      (s) => s.student_class === cls || s.class === cls
-    );
-    const co2 = classSubs.reduce((sum, s) => sum + (Number(s.co2_saved) || 0), 0);
-    const points = classSubs.reduce((sum, s) => sum + (Number(s.points) || 0), 0);
-    const studentCount = new Set(classSubs.map((s) => s.student_email || s.user_id)).size;
-
-    return {
-      name: cls,
-      co2: Number(co2.toFixed(1)),
-      points,
-      actionsCount: classSubs.length,
-      studentCount,
-    };
-  }).sort((a, b) => b.co2 - a.co2);
-
-  // 3. Calculate Students in Current User's Class ONLY (Child Safety & Scoped Rank)
-  const myClassSubs = verified.filter(
-    (s) => s.student_class === userClass || s.class === userClass
+  const myRankObj = myClassStudents.find(
+    (s) => s.student_id === user?.student_id || s.name === user?.name
   );
 
-  const myClassStudentsMap = {};
-  myClassSubs.forEach((s) => {
-    const key = s.student_email || s.user_id;
-    if (!myClassStudentsMap[key]) {
-      myClassStudentsMap[key] = {
-        name: s.student_name || 'Classmate',
-        email: s.student_email,
-        class: userClass,
-        house: s.student_house || 'Terra',
-        co2: 0,
-        points: 0,
-        actionsCount: 0,
-      };
-    }
-    myClassStudentsMap[key].co2 += Number(s.co2_saved) || 0;
-    myClassStudentsMap[key].points += Number(s.points) || 0;
-    myClassStudentsMap[key].actionsCount += 1;
-  });
-
-  // Ensure current user is in their class list even if 0 actions yet
-  if (user && !myClassStudentsMap[user.email]) {
-    myClassStudentsMap[user.email] = {
-      name: user.name || 'You',
-      email: user.email,
-      class: userClass,
-      house: user?.student_house || 'Terra',
-      co2: 0,
-      points: 0,
-      actionsCount: 0,
-    };
-  }
-
-  const myClassRanked = Object.values(myClassStudentsMap)
-    .sort((a, b) => b.co2 - a.co2)
-    .map((st, idx) => ({
-      ...st,
-      rank: idx + 1,
-      co2: Number(st.co2.toFixed(1)),
-      safeName: formatSafeName(st.name),
-    }));
-
-  const myRankObj = myClassRanked.find((s) => s.email === user?.email);
-
   // School Goal Progress
-  const progressPercent = Math.min(100, Math.round((totalCO2 / SCHOOL_GOAL.targetKg) * 100));
+  const progressPercent = Math.min(100, Math.round((schoolCO2 / SCHOOL_GOAL.targetKg) * 100));
+
 
   return (
     <div className="page-container gradient-mesh">
@@ -185,7 +178,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
 
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '2rem', fontWeight: 900, color: '#fde047' }}>
-              {totalCO2} / {SCHOOL_GOAL.targetKg} kg
+              {schoolCO2} / {SCHOOL_GOAL.targetKg} kg
             </div>
             <div style={{ fontSize: '0.82rem', color: '#a7f3d0' }}>
               {progressPercent}% Milestone Achieved
@@ -481,7 +474,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
                 color: '#065f46',
               }}>
                 <Sparkles size={16} />
-                Your Rank in {userClass}: #{myRankObj.rank} of {myClassRanked.length}
+                Your Rank in {userClass}: #{myRankObj.rank} of {myClassStudents.length}
               </div>
             )}
           </div>
@@ -499,11 +492,11 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
                 </tr>
               </thead>
               <tbody>
-                {myClassRanked.map((st) => {
-                  const isCurrent = st.email === user?.email;
+                {myClassStudents.map((st) => {
+                  const isCurrent = st.name === user?.name;
                   return (
                     <tr
-                      key={st.email}
+                      key={st.rank}
                       style={{
                         backgroundColor: isCurrent ? 'rgba(16, 185, 129, 0.08)' : 'transparent',
                         fontWeight: isCurrent ? 700 : 'normal',
@@ -535,7 +528,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
                       </td>
                       <td>
                         <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#475569' }}>
-                          {st.house}
+                          {st.class_name || userClass}
                         </span>
                       </td>
                       <td>{st.actionsCount} actions</td>

@@ -1,18 +1,15 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../lib/auth';
 import {
-  Mail,
   Lock,
   User,
-  Building,
+  Building2,
   AlertCircle,
   ArrowRight,
   Check,
   ChevronLeft,
   ChevronRight,
   GraduationCap,
-  Building2,
-  HeartHandshake,
 } from 'lucide-react';
 
 // Leaf icon matching CartSage
@@ -64,17 +61,15 @@ export default function AuthPage({ onAuthSuccess }) {
   const [isSignUp, setIsSignUp] = useState(false);
 
   // Sign In State
-  const [loginEmail, setLoginEmail] = useState('');
+  const [loginUsername, setLoginUsername] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
 
   // Sign Up State
   const [signupName, setSignupName] = useState('');
-  const [signupEmail, setSignupEmail] = useState('');
+  const [signupUsername, setSignupUsername] = useState('');
   const [signupPassword, setSignupPassword] = useState('');
-  const [signupRole, setSignupRole] = useState('student');
-  const [signupSchool, setSignupSchool] = useState('Model Higher Secondary School');
-  const [signupClass, setSignupClass] = useState('Class 11-A');
-  const [signupHouse, setSignupHouse] = useState('Terra House');
+  const [signupClass, setSignupClass] = useState('10A');
+  const [signupHouse, setSignupHouse] = useState('');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -96,10 +91,10 @@ export default function AuthPage({ onAuthSuccess }) {
     setLoading(true);
     setError(null);
     try {
-      await signIn(loginEmail, loginPassword);
+      await signIn(loginUsername, loginPassword);
       if (onAuthSuccess) onAuthSuccess();
     } catch (err) {
-      setError(err.message || 'Invalid email or password.');
+      setError(err.message || 'Wrong username or password.');
     } finally {
       setLoading(false);
     }
@@ -111,15 +106,17 @@ export default function AuthPage({ onAuthSuccess }) {
     setError(null);
     try {
       if (!signupName.trim()) throw new Error('Please enter your full name.');
+      if (!signupUsername.trim()) throw new Error('Please choose a username.');
+      // signUp POSTs to /auth/signup — only students can self-register
       await signUp({
-        email: signupEmail,
+        username: signupUsername.trim(),
         password: signupPassword,
         name: signupName,
-        role: signupRole,
-        school: signupSchool,
-        studentClass: signupRole === 'student' ? signupClass : null,
-        studentHouse: signupRole === 'student' ? signupHouse : null,
+        studentClass: signupClass,
+        studentHouse: signupHouse,
       });
+      // After signup, log them in automatically
+      await signIn(signupUsername.trim(), signupPassword);
       if (onAuthSuccess) onAuthSuccess();
     } catch (err) {
       setError(err.message || 'Failed to create account.');
@@ -355,18 +352,19 @@ export default function AuthPage({ onAuthSuccess }) {
 
               <form onSubmit={handleSignIn} style={{ display: 'flex', flexDirection: 'column', gap: '22px' }}>
                 <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">Email Address</label>
+                  <label className="form-label">Username</label>
                   <div style={{ position: 'relative' }}>
                     <input
-                      type="email"
+                      type="text"
                       required
-                      value={loginEmail}
-                      onChange={(e) => setLoginEmail(e.target.value)}
-                      placeholder="you@example.com"
+                      value={loginUsername}
+                      onChange={(e) => setLoginUsername(e.target.value)}
+                      placeholder="your_username"
                       className="form-input"
+                      autoComplete="username"
                       style={{ paddingLeft: '48px', height: '56px', fontSize: '1rem', borderRadius: '14px' }}
                     />
-                    <Mail size={19} style={{ position: 'absolute', left: '16px', top: '18px', color: '#94a3b8' }} />
+                    <User size={19} style={{ position: 'absolute', left: '16px', top: '18px', color: '#94a3b8' }} />
                   </div>
                 </div>
 
@@ -471,39 +469,11 @@ export default function AuthPage({ onAuthSuccess }) {
                   </div>
                 </div>
 
+                {/* Students only can self-register; teachers/admins are created by admin */}
                 <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">Account Role</label>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-                    {[
-                      { id: 'student', label: 'Student', icon: <GraduationCap size={15} /> },
-                      { id: 'admin', label: 'Teacher', icon: <Building2 size={15} /> },
-                      { id: 'sponsor', label: 'Sponsor', icon: <HeartHandshake size={15} /> },
-                    ].map((r) => (
-                      <button
-                        key={r.id}
-                        type="button"
-                        onClick={() => setSignupRole(r.id)}
-                        style={{
-                          padding: '11px 8px',
-                          borderRadius: '12px',
-                          border: signupRole === r.id ? '2px solid #10b981' : '1px solid #e2e8f0',
-                          backgroundColor: signupRole === r.id ? '#ecfdf5' : '#ffffff',
-                          color: signupRole === r.id ? '#047857' : '#64748b',
-                          fontSize: '0.86rem',
-                          fontWeight: 700,
-                          cursor: 'pointer',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          gap: '6px',
-                          transition: 'all 0.15s ease',
-                        }}
-                      >
-                        {r.icon}
-                        <span>{r.label}</span>
-                      </button>
-                    ))}
-                  </div>
+                  <label className="form-label" style={{ fontSize: '0.8rem', color: '#64748b', fontStyle: 'italic' }}>
+                    Only student accounts can be created here. Teachers are set up by your school admin.
+                  </label>
                 </div>
 
                 {/* Student Class and House selectors as requested */}
@@ -517,12 +487,12 @@ export default function AuthPage({ onAuthSuccess }) {
                         className="form-input"
                         style={{ height: '54px', borderRadius: '14px', paddingLeft: '16px' }}
                       >
-                        <option value="Class 11-A">Class 11-A</option>
-                        <option value="Class 11-B">Class 11-B</option>
-                        <option value="Class 10-A">Class 10-A</option>
-                        <option value="Class 10-B">Class 10-B</option>
-                        <option value="Class 12-A">Class 12-A</option>
-                        <option value="Class 12-B">Class 12-B</option>
+                      <option value="10A">Class 10-A</option>
+                        <option value="10B">Class 10-B</option>
+                        <option value="9A">Class 9-A</option>
+                        <option value="9B">Class 9-B</option>
+                        <option value="11A">Class 11-A</option>
+                        <option value="11B">Class 11-B</option>
                       </select>
                     </div>
 
@@ -558,18 +528,21 @@ export default function AuthPage({ onAuthSuccess }) {
                 </div>
 
                 <div className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label">Email Address</label>
+                  <label className="form-label">Username</label>
                   <div style={{ position: 'relative' }}>
                     <input
-                      type="email"
+                      type="text"
                       required
-                      value={signupEmail}
-                      onChange={(e) => setSignupEmail(e.target.value)}
-                      placeholder="you@example.com"
+                      minLength={3}
+                      maxLength={60}
+                      value={signupUsername}
+                      onChange={(e) => setSignupUsername(e.target.value.toLowerCase().replace(/\s+/g, '_'))}
+                      placeholder="your_username (no spaces)"
                       className="form-input"
+                      autoComplete="username"
                       style={{ paddingLeft: '48px', height: '54px', borderRadius: '14px' }}
                     />
-                    <Mail size={19} style={{ position: 'absolute', left: '16px', top: '17px', color: '#94a3b8' }} />
+                    <User size={19} style={{ position: 'absolute', left: '16px', top: '17px', color: '#94a3b8' }} />
                   </div>
                 </div>
 

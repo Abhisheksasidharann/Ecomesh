@@ -1,38 +1,26 @@
 import React, { useRef } from 'react';
-import {
-  Award,
-  Download,
-  Share2,
-  CheckCircle,
-  ShieldCheck,
-  Calendar,
-  Sparkles,
-  Building,
-  GraduationCap,
-  Printer,
-} from 'lucide-react';
+import { Award, Download, Share2, CheckCircle, ShieldCheck, Calendar, Sparkles, Building, GraduationCap, Printer } from 'lucide-react';
 import { useAuth } from '../lib/auth';
+import { useStudentSummary } from '../lib/api';
 
 export default function StudentCertificate({ submissions = [] }) {
   const { user } = useAuth();
   const certRef = useRef(null);
 
-  const studentName = user?.name || user?.email?.split('@')[0] || 'Abhishek Sasidharan';
-  const schoolName = user?.school || 'Model Higher Secondary School';
-  const currentDate = new Date().toLocaleDateString('en-US', {
-    month: 'long',
-    day: 'numeric',
-    year: 'numeric',
-  });
+  // Live backend summary for accurate CO2/points/level
+  const summary = useStudentSummary(user?.student_id);
 
-  const studentVerified = submissions.filter(
-    (s) => (s.student_email === user?.email || s.user_id === user?.id) && s.status === 'verified'
-  );
-  const studentCO2 = Number(
-    studentVerified.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0).toFixed(1)
-  );
-  const studentPoints = studentVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
-  const level = studentCO2 >= 100 ? 5 : studentCO2 >= 50 ? 4 : studentCO2 >= 20 ? 3 : studentCO2 >= 5 ? 2 : 1;
+  const studentName = user?.name || user?.student_id || 'Student';
+  const schoolName  = user?.school || 'Model Higher Secondary School';
+  const currentDate = new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+
+  // GET /my/submissions already scoped — no extra filter needed
+  const studentVerified = submissions.filter((s) => s.status === 'verified');
+
+  // Prefer backend summary values; fall back to local sum
+  const studentCO2    = summary.co2_total > 0 ? summary.co2_total : Number(studentVerified.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0).toFixed(1));
+  const studentPoints = summary.points    > 0 ? summary.points    : studentVerified.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  const level      = summary.level || (studentCO2 >= 100 ? 5 : studentCO2 >= 50 ? 4 : studentCO2 >= 20 ? 3 : studentCO2 >= 5 ? 2 : 1);
   const levelTitle = level >= 4 ? 'Campus Eco Pioneer' : level >= 3 ? 'Climate Guardian' : level >= 2 ? 'Active Steward' : 'Green Citizen';
 
   const handlePrint = () => {

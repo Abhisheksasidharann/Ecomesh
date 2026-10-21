@@ -193,6 +193,24 @@ export const DAILY_ACTION_CAPS = {
   water: { maxUnits: 200, unit: 'liters' },
 };
 
+// Maps frontend short action-type keys → backend ActionType enum values.
+// The backend rejects any key not in this list with a 422 Unprocessable Entity.
+export const BACKEND_ACTION_TYPE = {
+  plantation: 'plantation',
+  waste: 'waste_segregation',
+  transport: 'sustainable_transport',
+  solar: 'solar_adoption',
+  water: 'water_conservation',
+};
+
+// Reverse map: backend key → frontend key (for normalising data coming back from the API)
+export const FRONTEND_ACTION_TYPE = Object.fromEntries(
+  Object.entries(BACKEND_ACTION_TYPE).map(([fe, be]) => [be, fe])
+);
+
+// Default school ID used until multi-school is wired end-to-end
+export const DEFAULT_SCHOOL_ID = import.meta.env.VITE_SCHOOL_ID || 'SCH001';
+
 // Gamification v2 Badges
 export const BADGE_DEFINITIONS_V2 = [
   { id: 'first_tree', name: 'Tree Planter', type: 'category', category: 'plantation', icon: '🌳', color: '#059669', desc: 'First verified tree plantation' },
