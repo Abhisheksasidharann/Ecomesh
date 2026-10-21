@@ -633,3 +633,201 @@ def claim_mission(mission_id: str, request: Request):
 def student_missions(student_id: str):
     _, missions = week_missions(student_id)
     return missions
+
+# ---------- Sponsor impact report (CSV) ----------
+import csv
+import io
+
+from fastapi.responses import Response
+from impact_agent import FACTORS
+
+ROLE_RULES.append(("GET", "/reports", {"teacher", "admin"}))
+
+
+@app.get("/reports/school/{school_id}")
+def school_report(school_id: str):
+    school = schools.find_one({"_id": school_id})
+    if school is None:
+        raise HTTPException(status_code=404, detail="Unknown school")
+    impact = school_impact(school_id)
+    goal = get_school_goal(school_id)
+    classes = {s["_id"]: s.get("class_name", "") for s in students.find({"school_id": school_id})}
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["EcoMesh verified impact report"])
+    w.writerow(["School", school.get("name", ""), school_id])
+    w.writerow(["Generated (UTC)", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")])
+    w.writerow(["Note", "Estimated carbon impact of verified student actions. Not certified carbon credits."])
+    w.writerow([])
+
+    w.writerow(["SUMMARY"])
+    w.writerow(["Total verified impact (kg CO2e)", impact["total_kg_co2e"]])
+    w.writerow(["School goal (kg CO2e)", goal["target_kg"], "Progress %", goal["percent"], "Reward", goal["reward"]])
+    w.writerow([])
+
+    w.writerow(["BY ACTION TYPE"])
+    w.writerow(["Action", "Verified actions", "kg CO2e"])
+    for action, v in impact["by_action"].items():
+        w.writerow([action, v["actions"], v["kg_co2e"]])
+    w.writerow([])
+
+    w.writerow(["EMISSION FACTORS USED"])
+    w.writerow(["Action", "Factor (kg CO2e per unit)", "Unit", "Source"])
+    for action, f in FACTORS.items():
+        w.writerow([action, f["factor"], f["unit"], f["source"]])
+    w.writerow([])
+
+    w.writerow(["APPROVED FUND ALLOCATIONS"])
+    w.writerow(["Decided at", "Approved by", "Total cost (Rs)", "Projects"])
+    for p in proposals.find({"school_id": school_id, "status": "approved"}):
+        w.writerow([
+            p.get("decided_at", ""), p.get("decided_by", ""), p["total_cost"],
+            "; ".join(x["name"] for x in p["selected"]),
+        ])
+    w.writerow([])
+
+    w.writerow(["AUDIT TRAIL: VERIFIED ACTIONS"])
+    w.writerow(["Date", "Class", "Action", "Quantity", "kg CO2e", "Trust score", "Verified by"])
+    for s in submissions.find({"school_id": school_id, "status": "verified"}).sort("captured_at", 1):
+        w.writerow([
+            s["captured_at"].strftime("%Y-%m-%d"),
+            classes.get(s["student_id"], ""),
+            s["action_type"],
+            s.get("quantity", ""),
+            s.get("impact_kg_co2e", ""),
+            s.get("trust_score", ""),
+            s.get("reviewed_by") or "automatic pipeline",
+        ])
+
+    return Response(
+        content="\ufeff" + buf.getvalue(),  # BOM so Excel opens it correctly
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="ecomesh_{school_id}_report.csv"'},
+    )
+
+# ---------- Community Benefit Optimization ----------
+from benefit_agent import optimize
+
+funds = db["funds"]
+projects = db["projects"]
+proposals = db["proposals"]
+
+
+class FundIn(BaseModel):
+    sponsor: str
+    amount: float = Field(gt=0)
+    note: str = ""
+
+
+class ProjectIn(BaseModel):
+    name: str
+    category: Literal["solar", "scholarship", "sustainability"]
+    cost: float = Field(gt=0)
+    need: int = Field(ge=1, le=5)
+    impact: int = Field(ge=1, le=5)
+
+
+class DecisionIn(BaseModel):
+    decision: Literal["approve", "reject"]
+    reviewer: str
+    note: str = ""
+
+
+def available_budget(school_id):
+    received = sum(f["amount"] for f in funds.find({"school_id": school_id}))
+    committed = sum(p["total_cost"] for p in proposals.find({"school_id": school_id, "status": "approved"}))
+    return round(received - committed, 2)
+
+
+@app.post("/schools/{school_id}/funds")
+def add_funds(school_id: str, body: FundIn):
+    funds.insert_one({
+        "school_id": school_id, "sponsor": body.sponsor, "amount": body.amount,
+        "note": body.note, "received_at": datetime.now(timezone.utc),
+    })
+    return {"school_id": school_id, "available_budget": available_budget(school_id)}
+
+
+@app.post("/schools/{school_id}/projects")
+def add_project(school_id: str, body: ProjectIn):
+    doc = body.model_dump()
+    doc.update({"school_id": school_id, "status": "open", "created_at": datetime.now(timezone.utc)})
+    result = projects.insert_one(doc)
+    return {"id": str(result.inserted_id), "status": "open"}
+
+
+@app.get("/schools/{school_id}/projects")
+def list_projects(school_id: str):
+    return [clean(p) for p in projects.find({"school_id": school_id})]
+
+
+@app.post("/benefit/propose/{school_id}")
+def propose_allocation(school_id: str):
+    budget = available_budget(school_id)
+    if budget <= 0:
+        raise HTTPException(status_code=400, detail="No available funds for this school")
+    open_projects = [clean(p) for p in projects.find({"school_id": school_id, "status": "open"})]
+    if not open_projects:
+        raise HTTPException(status_code=400, detail="No open projects for this school")
+
+    result = optimize(open_projects, budget)
+
+    scholarship_candidates = []
+    if any(p["category"] == "scholarship" for p in result["selected"]):
+        top = submissions.aggregate([
+            {"$match": {"school_id": school_id, "status": "verified"}},
+            {"$group": {"_id": "$student_id", "points": {"$sum": "$points_awarded"},
+                        "kg_co2e": {"$sum": "$impact_kg_co2e"}}},
+            {"$sort": {"points": -1}},
+            {"$limit": 3},
+        ])
+        scholarship_candidates = [
+            {"student_id": t["_id"], "points": t["points"], "kg_co2e": round(t["kg_co2e"], 3)}
+            for t in top
+        ]
+
+    proposals.update_many({"school_id": school_id, "status": "proposed"}, {"$set": {"status": "superseded"}})
+    doc = {
+        "school_id": school_id,
+        "budget": budget,
+        **result,
+        "scholarship_candidates": scholarship_candidates,
+        "school_impact_kg_co2e": school_impact(school_id)["total_kg_co2e"],
+        "status": "proposed",
+        "created_at": datetime.now(timezone.utc),
+    }
+    proposals.insert_one(doc)
+    return clean(doc)
+
+
+@app.post("/benefit/{proposal_id}/decision")
+def decide_proposal(proposal_id: str, body: DecisionIn):
+    try:
+        oid = ObjectId(proposal_id)
+    except InvalidId:
+        raise HTTPException(status_code=400, detail="Invalid proposal id")
+    p = proposals.find_one({"_id": oid})
+    if p is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if p["status"] != "proposed":
+        raise HTTPException(status_code=409, detail=f"Proposal is already {p['status']}")
+
+    update = {"decided_by": body.reviewer, "decision_note": body.note,
+              "decided_at": datetime.now(timezone.utc)}
+    if body.decision == "reject":
+        update["status"] = "rejected"
+    else:
+        if p["total_cost"] > available_budget(p["school_id"]):
+            raise HTTPException(status_code=409, detail="Budget changed; generate a new proposal")
+        update["status"] = "approved"
+        for s in p["selected"]:
+            projects.update_one({"_id": ObjectId(s["id"])}, {"$set": {"status": "funded"}})
+    proposals.update_one({"_id": oid}, {"$set": update})
+    return {"id": proposal_id, "status": update["status"],
+            "available_budget": available_budget(p["school_id"])}
+
+
+@app.get("/benefit/proposals/{school_id}")
+def list_proposals(school_id: str):
+    return [clean(p) for p in proposals.find({"school_id": school_id}).sort("created_at", -1)]
