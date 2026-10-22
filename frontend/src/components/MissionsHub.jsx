@@ -1,59 +1,114 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../lib/auth';
-import { BADGE_DEFINITIONS_V2, getStudentLevel, EMISSION_FACTORS } from '../lib/constants';
-import { useStudentSummary, apiMyMissions, apiClaimMission } from '../lib/api';
+import { apiMyMissions, apiClaimMission } from '../lib/api';
 import {
-  Trophy, Flame, CheckCircle2, Target, Sparkles, ArrowRight, Zap, Leaf, Shield, Compass, Gift, RefreshCw, AlertCircle,
+  BADGE_DEFINITIONS_V2,
+  getStudentLevel,
+  EMISSION_FACTORS,
+} from '../lib/constants';
+import {
+  Trophy,
+  CheckCircle2,
+  Target,
+  Compass,
+  AlertCircle,
+  Loader2,
+  Gift,
 } from 'lucide-react';
 
-export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavigateUpload }) {
+// ---------------------------------------------------------------------------
+// Local fallback missions shown when the backend returns no missions or
+// the /my/missions endpoint is not yet implemented. Each item includes all
+// fields the live API is also expected to return so the rendering path is
+// identical for both cases.
+// ---------------------------------------------------------------------------
+function buildFallbackMissions({ untriedCategories, levelInfo, levelMultiplier, studentActions, studentCO2 }) {
+  const nudgeCategoryKey = untriedCategories[0] || 'solar';
+  const nudgeMeta = EMISSION_FACTORS[nudgeCategoryKey] || EMISSION_FACTORS.plantation;
+
+  return [
+    {
+      id: 'mission_diversity_nudge',
+      title: `Diversity Nudge: Try ${nudgeMeta.name}`,
+      tag: 'Adaptive Recommendation',
+      bonus_points: 25,
+      description: `Expand your climate habits! You haven't logged ${nudgeMeta.name.toLowerCase()} yet. Earn bonus EcoPoints by trying it this week.`,
+      target_label: `1 ${nudgeMeta.unit}`,
+      icon: nudgeCategoryKey === 'plantation' ? '🌳' : nudgeCategoryKey === 'waste' ? '♻️' : nudgeCategoryKey === 'transport' ? '🚲' : nudgeCategoryKey === 'solar' ? '☀️' : '💧',
+      isAdaptiveNudge: true,
+      progress: 0,
+      target: 1,
+      completed: false,
+      claimed: false,
+    },
+    {
+      id: 'mission_weekly_habit',
+      title: 'Active Weekly Habit Milestone',
+      tag: 'Weekly Streak Quest',
+      bonus_points: 30,
+      description: 'Submit at least 2 verified green actions on campus grounds this week.',
+      target_label: `${Math.min(2, studentActions.length)} / 2 actions completed`,
+      icon: '🔥',
+      isAdaptiveNudge: false,
+      progress: Math.min(2, studentActions.length),
+      target: 2,
+      completed: studentActions.length >= 2,
+      claimed: false,
+    },
+    {
+      id: 'mission_level_scaling',
+      title: `Level ${levelInfo.level} Climate Target`,
+      tag: `Scaled for ${levelInfo.name}`,
+      bonus_points: levelMultiplier * 15,
+      description: `Target scaled to your verified experience: prevent ${levelMultiplier * 5} kg of verified carbon this term.`,
+      target_label: `${Math.min(levelMultiplier * 5, Math.round(studentCO2))} / ${levelMultiplier * 5} kg CO₂`,
+      icon: levelInfo.icon,
+      isAdaptiveNudge: false,
+      progress: Math.min(levelMultiplier * 5, Math.round(studentCO2)),
+      target: levelMultiplier * 5,
+      completed: Math.round(studentCO2) >= levelMultiplier * 5,
+      claimed: false,
+    },
+    {
+      id: 'mission_campus_steward',
+      title: 'School Campus Steward',
+      tag: 'Campus Impact',
+      bonus_points: 20,
+      description: 'Help the school achieve the 500 kg rooftop solar milestone with a campus-based action.',
+      target_label: 'Campus grounds verified',
+      icon: '🏫',
+      isAdaptiveNudge: false,
+      progress: 0,
+      target: 1,
+      completed: false,
+      claimed: false,
+    },
+  ];
+}
+
+export default function MissionsHub({ verifiedOnly = [], totalPoints: _totalPoints = 0, token, onNavigateUpload }) {
   const { user } = useAuth();
 
-  // ── Live backend summary ────────────────────────────────────────────────────
-  const summary = useStudentSummary(user?.student_id);
+  // Live mission state
+  const [missions, setMissions] = useState([]);
+  const [missionsLoading, setMissionsLoading] = useState(true);
+  const [claimingId, setClaimingId] = useState(null);
+  const [claimError, setClaimError] = useState('');
 
-  // ── Local submission data (fallback when summary still loading) ─────────
-  // GET /my/submissions already scoped to this student — no filter needed
-  const studentActions = verifiedOnly;
-
-  const studentCO2 = summary.co2_total > 0
-    ? summary.co2_total
-    : studentActions.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0);
-
-  const studentVerifiedPoints = summary.points > 0
-    ? summary.points
-    : studentActions.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
-
-  // Student Level: backend wins, local fallback while loading
-  const levelInfo = summary.loading
-    ? getStudentLevel(studentVerifiedPoints)
-    : {
-        level:           summary.level,
-        name:            summary.levelName,
-        icon:            summary.levelIcon,
-        progressPercent: summary.progressPercent,
-        nextLevelName:   summary.nextLevelName,
-        pointsToNext:    summary.pointsToNext,
-      };
-
-  // Streak from backend (real calendar weeks), not action count
-  const realStreakWeeks = summary.streakWeeks;
-
-  // Set of activity types completed (from local submissions)
+  // Derived values from local verified submissions (used for badges + fallback)
+  const studentActions = verifiedOnly.filter(
+    (s) => s.student_email === user?.email || s.user_id === user?.id,
+  );
+  const studentCO2 = studentActions.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0);
+  const studentVerifiedPoints = studentActions.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  const levelInfo = getStudentLevel(studentVerifiedPoints);
   const completedCategories = new Set(studentActions.map((s) => s.activity));
   const allCategories = ['plantation', 'waste', 'transport', 'solar', 'water'];
   const untriedCategories = allCategories.filter((cat) => !completedCategories.has(cat));
+  const levelMultiplier = Math.max(1, levelInfo.level);
 
-  // Backend returns earned badge IDs in summary.badges (e.g. ["first_tree", "co2_10kg"])
-  const earnedBadgeIds = new Set(summary.badges || []);
-
-  // Determine Badge Unlocks: check backend list first, fall back to local logic
+  // Badge unlock helper (unchanged from original)
   const getBadgeStatus = (badge) => {
-    // If backend says it's earned, trust it
-    if (earnedBadgeIds.has(badge.id)) {
-      return { unlocked: true, current: 1, target: 1, unit: '' };
-    }
-    // Otherwise compute locally
     if (badge.type === 'category') {
       const count = studentActions.filter((s) => s.activity === badge.category).length;
       return { unlocked: count >= 1, current: count, target: 1, unit: 'action' };
@@ -64,10 +119,10 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
     }
     if (badge.type === 'streak') {
       const targetWeeks = badge.id === 'streak_2wk' ? 2 : 4;
-      // Prefer real backend streak weeks
-      const currentWeeks = realStreakWeeks > 0
-        ? Math.min(realStreakWeeks, targetWeeks)
-        : Math.min(targetWeeks, Math.floor(studentActions.length / 2) || (studentActions.length > 0 ? 1 : 0));
+      const currentWeeks = Math.min(
+        targetWeeks,
+        Math.floor(studentActions.length / 2) || (studentActions.length > 0 ? 1 : 0),
+      );
       return { unlocked: currentWeeks >= targetWeeks, current: currentWeeks, target: targetWeeks, unit: 'weeks active' };
     }
     if (badge.type === 'co2') {
@@ -79,77 +134,56 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
 
   const unlockedCount = BADGE_DEFINITIONS_V2.filter((b) => getBadgeStatus(b).unlocked).length;
 
-  // ── Live missions from backend ─────────────────────────────────────────────
-  // GET /my/missions returns: { id, kind, action_type, target, bonus, title, reason, progress, complete, claimed }
-  const [liveMissions, setLiveMissions] = useState([]);
-  const [missionsLoading, setMissionsLoading] = useState(true);
-  const [claimingId, setClaimingId] = useState(null);
-  const [claimError, setClaimError] = useState(null);
+  // -------------------------------------------------------------------------
+  // Fetch live missions from backend
+  // -------------------------------------------------------------------------
+  const fetchMissions = useCallback(async () => {
+    if (!token) return;
+    try {
+      setMissionsLoading(true);
+      const data = await apiMyMissions(token);
+      if (Array.isArray(data) && data.length > 0) {
+        setMissions(data);
+      } else {
+        // Backend returned empty or endpoint not yet implemented → local fallback
+        setMissions(
+          buildFallbackMissions({ untriedCategories, levelInfo, levelMultiplier, studentActions, studentCO2 }),
+        );
+      }
+    } catch {
+      // API not available → silently use local fallback missions
+      setMissions(
+        buildFallbackMissions({ untriedCategories, levelInfo, levelMultiplier, studentActions, studentCO2 }),
+      );
+    } finally {
+      setMissionsLoading(false);
+    }
+  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    setMissionsLoading(true);
-    apiMyMissions()
-      .then(setLiveMissions)
-      .catch(() => setLiveMissions([]))
-      .finally(() => setMissionsLoading(false));
-  }, []);
+    fetchMissions();
+  }, [fetchMissions]);
 
-  const handleClaim = async (missionId) => {
-    setClaimingId(missionId);
-    setClaimError(null);
+  // -------------------------------------------------------------------------
+  // Claim a completed, unclaimed mission
+  // -------------------------------------------------------------------------
+  const handleClaim = async (mission) => {
+    setClaimingId(mission.id);
+    setClaimError('');
     try {
-      const result = await apiClaimMission(missionId);
-      // Mark claimed locally for instant UI feedback
-      setLiveMissions((prev) =>
-        prev.map((m) => m.id === missionId ? { ...m, claimed: true } : m)
+      await apiClaimMission(mission.id, token);
+      // Optimistically mark as claimed in local state
+      setMissions((current) =>
+        current.map((item) =>
+          item.id === mission.id ? { ...item, claimed: true } : item,
+        ),
       );
-      // Trigger a full summary reload so points update in Sidebar/Dashboard
-      // (the parent useStudentSummary will re-fetch on next render cycle)
     } catch (err) {
-      setClaimError(err.message || 'Failed to claim bonus. Try again.');
+      setClaimError(err.message || 'Could not claim this mission. Please try again.');
     } finally {
       setClaimingId(null);
     }
   };
-
-  // Kind → display metadata
-  const KIND_META = {
-    comeback:  { tag: 'Re-engagement Nudge',    icon: '🔄', isHighlight: false },
-    diversity: { tag: 'Adaptive Recommendation', icon: '🌈', isHighlight: true  },
-    challenge: { tag: 'Level Challenge',         icon: '⚡', isHighlight: false },
-  };
-
-  // Fallback local missions shown while backend loads
-  const nudgeCategoryKey = untriedCategories[0] || 'solar';
-  const nudgeMeta = EMISSION_FACTORS[nudgeCategoryKey] || EMISSION_FACTORS.plantation;
-  const levelMultiplier = Math.max(1, levelInfo.level);
-  const fallbackMissions = [
-    {
-      id: 'local_diversity_nudge', kind: 'diversity',
-      title: `Try ${nudgeMeta.name}`,
-      reason: "You haven't logged this action type yet",
-      bonus: 25, target: 1, progress: 0, complete: false, claimed: false,
-      action_type: nudgeCategoryKey,
-    },
-    {
-      id: 'local_weekly_habit', kind: 'challenge',
-      title: 'Active Weekly Habit Milestone',
-      reason: 'Submit 2 verified green actions this week',
-      bonus: 30, target: 2, progress: Math.min(2, studentActions.length), complete: studentActions.length >= 2, claimed: false,
-      action_type: null,
-    },
-    {
-      id: 'local_level_target', kind: 'challenge',
-      title: `Level ${levelInfo.level} Climate Target`,
-      reason: `Target scales with your ${levelInfo.name} level`,
-      bonus: levelMultiplier * 15, target: levelMultiplier * 5, progress: Math.round(studentCO2), complete: studentCO2 >= levelMultiplier * 5, claimed: false,
-      action_type: null,
-    },
-  ];
-
-  const displayMissions = missionsLoading
-    ? fallbackMissions
-    : liveMissions.length > 0 ? liveMissions : fallbackMissions;
 
   return (
     <div className="page-container gradient-mesh">
@@ -172,7 +206,7 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
           <span>Adaptive Gamification Engine v2</span>
         </div>
         <h1 style={{ fontSize: '2.4rem', fontWeight: 800, color: '#0f172a', letterSpacing: '-0.03em' }}>
-          Badges, Levels & Quests
+          Badges, Levels &amp; Quests
         </h1>
         <p style={{ fontSize: '1.05rem', color: '#64748b', marginTop: '4px' }}>
           Level up from Seedling to Forest. Take personalized weekly missions and unlock verified IPCC milestone badges.
@@ -243,12 +277,7 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
             <span>Progress toward {levelInfo.nextLevelName} ({levelInfo.pointsToNext > 0 ? `${levelInfo.pointsToNext} points needed` : 'Max Level achieved!'})</span>
             <span>{levelInfo.progressPercent}%</span>
           </div>
-          <div style={{
-            height: '10px',
-            borderRadius: '9999px',
-            backgroundColor: 'rgba(255, 255, 255, 0.2)',
-            overflow: 'hidden',
-          }}>
+          <div style={{ height: '10px', borderRadius: '9999px', backgroundColor: 'rgba(255, 255, 255, 0.2)', overflow: 'hidden' }}>
             <div style={{
               height: '100%',
               borderRadius: '9999px',
@@ -279,128 +308,171 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
           </span>
         </div>
 
-        {/* Claim error */}
+        {/* Claim error banner */}
         {claimError && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: '8px',
-            padding: '10px 16px', marginBottom: '16px',
-            borderRadius: '10px', backgroundColor: '#fef2f2',
-            border: '1px solid #fecaca', color: '#b91c1c', fontSize: '0.85rem',
-          }}>
-            <AlertCircle size={16} />
+          <div className="cs-alert error" style={{ marginBottom: '16px' }}>
+            <AlertCircle size={18} />
             <span>{claimError}</span>
           </div>
         )}
 
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-          gap: '20px',
-        }}>
-          {displayMissions.map((quest) => {
-            const meta    = KIND_META[quest.kind] || KIND_META.challenge;
-            const pct     = Math.min(100, Math.round((quest.progress / quest.target) * 100));
-            const isClaiming = claimingId === quest.id;
+        {missionsLoading ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '24px', color: '#64748b', fontSize: '0.95rem' }}>
+            <Loader2 size={20} style={{ animation: 'spin 0.8s linear infinite' }} />
+            <span>Loading your missions...</span>
+            <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          </div>
+        ) : (
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
+            gap: '20px',
+          }}>
+            {missions.map((quest) => {
+              const isComplete = quest.completed === true;
+              const isClaimed = quest.claimed === true;
+              const isClaiming = claimingId === quest.id;
+              const progressPercent = quest.target > 0
+                ? Math.min(100, Math.round(((quest.progress ?? 0) / quest.target) * 100))
+                : isComplete ? 100 : 0;
 
-            return (
-              <div
-                key={quest.id}
-                className="stat-card"
-                style={{
-                  padding: '24px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  justifyContent: 'space-between',
-                  border: meta.isHighlight ? '2px solid #10b981' : '1px solid #e2e8f0',
-                  background: meta.isHighlight ? 'linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%)' : '#ffffff',
-                  opacity: quest.claimed ? 0.72 : 1,
-                }}
-              >
-                <div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
-                    <span style={{ fontSize: '2rem' }}>{meta.icon}</span>
-                    <span className={`status-badge ${quest.claimed ? 'review' : quest.complete ? 'verified' : 'pending'}`}
-                      style={{ fontSize: '0.78rem', fontWeight: 800 }}>
-                      {quest.claimed ? '✓ Claimed' : quest.complete ? '🎉 Complete!' : `+${quest.bonus} pts`}
-                    </span>
+              return (
+                <div
+                  key={quest.id}
+                  className="stat-card"
+                  style={{
+                    padding: '24px',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'space-between',
+                    border: quest.isAdaptiveNudge ? '2px solid #10b981' : isClaimed ? '2px solid #a7f3d0' : '1px solid #e2e8f0',
+                    background: isClaimed
+                      ? 'linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%)'
+                      : quest.isAdaptiveNudge
+                        ? 'linear-gradient(180deg, #f0fdf4 0%, #ffffff 100%)'
+                        : '#ffffff',
+                    opacity: isClaimed ? 0.85 : 1,
+                  }}
+                >
+                  <div>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '12px' }}>
+                      <span style={{ fontSize: '2rem' }}>{quest.icon}</span>
+                      <span className="status-badge verified" style={{ fontSize: '0.8rem', fontWeight: 800 }}>
+                        +{quest.bonus_points ?? quest.bonus} pts
+                      </span>
+                    </div>
+
+                    <div style={{
+                      fontSize: '0.72rem',
+                      fontWeight: 800,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.05em',
+                      color: quest.isAdaptiveNudge ? '#059669' : '#64748b',
+                      marginBottom: '4px',
+                    }}>
+                      {quest.tag}
+                    </div>
+
+                    <h3 style={{ fontSize: '1.15rem', fontWeight: 800, color: '#0f172a', marginBottom: '6px' }}>
+                      {quest.title}
+                    </h3>
+                    <p style={{ fontSize: '0.84rem', color: '#475569', lineHeight: 1.5, marginBottom: '10px' }}>
+                      {quest.description}
+                    </p>
+
+                    {/* Progress bar */}
+                    {quest.target > 0 && (
+                      <div style={{ marginBottom: '12px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.76rem', color: '#64748b', marginBottom: '4px', fontWeight: 600 }}>
+                          <span>{quest.target_label ?? `${quest.progress ?? 0} / ${quest.target}`}</span>
+                          <span>{progressPercent}%</span>
+                        </div>
+                        <div style={{ height: '7px', borderRadius: '9999px', backgroundColor: '#e2e8f0', overflow: 'hidden' }}>
+                          <div style={{
+                            height: '100%',
+                            borderRadius: '9999px',
+                            backgroundColor: isComplete ? '#10b981' : '#0d9488',
+                            width: `${progressPercent}%`,
+                            transition: 'width 0.5s ease',
+                          }} />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Completion/claimed status label */}
+                    {isClaimed && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#059669', fontWeight: 700, marginBottom: '8px' }}>
+                        <CheckCircle2 size={15} />
+                        Bonus claimed ✓
+                      </div>
+                    )}
+                    {isComplete && !isClaimed && (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.8rem', color: '#d97706', fontWeight: 700, marginBottom: '8px' }}>
+                        <Gift size={15} />
+                        Mission complete — claim your bonus!
+                      </div>
+                    )}
                   </div>
 
-                  <div style={{
-                    fontSize: '0.72rem', fontWeight: 800, textTransform: 'uppercase',
-                    letterSpacing: '0.05em',
-                    color: meta.isHighlight ? '#059669' : '#64748b',
-                    marginBottom: '4px',
-                  }}>
-                    {missionsLoading ? 'Loading...' : meta.tag}
-                  </div>
+                  <div style={{ marginTop: '16px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                    {/* Claim button — only when complete and not yet claimed */}
+                    {isComplete && !isClaimed && (
+                      <button
+                        onClick={() => handleClaim(quest)}
+                        disabled={isClaiming}
+                        className="btn-primary"
+                        style={{
+                          flex: 1,
+                          padding: '10px 14px',
+                          fontSize: '0.88rem',
+                          background: 'linear-gradient(135deg, #d97706 0%, #f59e0b 100%)',
+                          opacity: isClaiming ? 0.7 : 1,
+                          cursor: isClaiming ? 'not-allowed' : 'pointer',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '6px',
+                        }}
+                      >
+                        {isClaiming ? (
+                          <>
+                            <Loader2 size={14} style={{ animation: 'spin 0.8s linear infinite' }} />
+                            Claiming…
+                          </>
+                        ) : (
+                          <>
+                            <Gift size={14} />
+                            Claim Bonus
+                          </>
+                        )}
+                      </button>
+                    )}
 
-                  <h3 style={{ fontSize: '1.1rem', fontWeight: 800, color: '#0f172a', marginBottom: '6px' }}>
-                    {quest.title}
-                  </h3>
-                  <p style={{ fontSize: '0.83rem', color: '#475569', lineHeight: 1.5, marginBottom: '14px' }}>
-                    {quest.reason}
-                  </p>
-
-                  {/* Real progress bar from backend */}
-                  <div style={{ marginBottom: '4px' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.76rem', color: '#64748b', marginBottom: '6px', fontWeight: 600 }}>
-                      <span>{quest.progress} / {quest.target} actions</span>
-                      <span>{pct}%</span>
-                    </div>
-                    <div style={{ height: '8px', borderRadius: '9999px', backgroundColor: '#e2e8f0', overflow: 'hidden' }}>
-                      <div style={{
-                        height: '100%',
-                        borderRadius: '9999px',
-                        background: quest.complete
-                          ? 'linear-gradient(90deg, #34d399, #10b981)'
-                          : 'linear-gradient(90deg, #06b6d4, #3b82f6)',
-                        width: `${pct}%`,
-                        transition: 'width 0.5s ease',
-                      }} />
-                    </div>
+                    {/* Log Action button — always present unless claimed */}
+                    {!isClaimed && (
+                      <button
+                        onClick={() => { if (onNavigateUpload) onNavigateUpload(); }}
+                        className="btn-primary"
+                        style={{
+                          flex: 1,
+                          padding: '10px 14px',
+                          fontSize: '0.88rem',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '6px',
+                        }}
+                      >
+                        <Target size={15} />
+                        Log Action
+                      </button>
+                    )}
                   </div>
                 </div>
-
-                <div style={{ marginTop: '16px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {/* Claim Bonus button — only shown when complete and not claimed */}
-                  {quest.complete && !quest.claimed && (
-                    <button
-                      onClick={() => handleClaim(quest.id)}
-                      disabled={isClaiming}
-                      className="btn-primary"
-                      style={{ width: '100%', padding: '10px 14px', fontSize: '0.88rem',
-                        background: 'linear-gradient(135deg, #f59e0b, #d97706)',
-                        opacity: isClaiming ? 0.7 : 1,
-                      }}
-                    >
-                      {isClaiming
-                        ? <><RefreshCw size={14} style={{ animation: 'spin 0.8s linear infinite' }} /> Claiming...</>
-                        : <><Gift size={14} /> Claim +{quest.bonus} Bonus Points!</>}
-                    </button>
-                  )}
-
-                  {/* Log Action button — shown when not yet complete */}
-                  {!quest.complete && (
-                    <button
-                      onClick={() => onNavigateUpload && onNavigateUpload()}
-                      className="btn-primary"
-                      style={{ width: '100%', padding: '10px 14px', fontSize: '0.88rem' }}
-                    >
-                      <Target size={15} />
-                      Log Action for Quest
-                    </button>
-                  )}
-
-                  {quest.claimed && (
-                    <div style={{ textAlign: 'center', fontSize: '0.82rem', color: '#059669', fontWeight: 700 }}>
-                      ✅ Bonus claimed — keep going!
-                    </div>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Gamification v2 Milestone Achievement Badges */}
@@ -473,12 +545,7 @@ export default function MissionsHub({ verifiedOnly = [], totalPoints = 0, onNavi
                     <span>{status.current} / {status.target} {status.unit}</span>
                     <span>{progress}%</span>
                   </div>
-                  <div style={{
-                    height: '8px',
-                    borderRadius: '9999px',
-                    backgroundColor: '#e2e8f0',
-                    overflow: 'hidden',
-                  }}>
+                  <div style={{ height: '8px', borderRadius: '9999px', backgroundColor: '#e2e8f0', overflow: 'hidden' }}>
                     <div style={{
                       height: '100%',
                       borderRadius: '9999px',

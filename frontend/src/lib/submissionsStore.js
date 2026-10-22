@@ -1,135 +1,78 @@
+/**
+ * useSubmissions — fetches submissions from the FastAPI backend and provides
+ * helpers for adding, reviewing, and exporting them.
+ *
+ * Replaces the previous Supabase-based implementation.
+ * The data shapes returned by the backend are expected to match the field
+ * names already used throughout the app (id, student_name, student_email,
+ * activity, quantity, unit, co2_saved, points, location_type, latitude,
+ * longitude, distance_meters, photo_hash, trust_score, status, reviewed_by,
+ * reviewed_at, note, created_at, student_class, student_house).
+ */
+
 import { useState, useEffect, useCallback } from 'react';
 import {
-  apiCreateSubmission,
-  apiMySubmissions,
-  apiReviewQueue,
+  apiGetSubmissions,
+  apiSubmitAction,
   apiReviewSubmission,
 } from './api';
 import {
   EMISSION_FACTORS,
-  FRONTEND_ACTION_TYPE,
-  BACKEND_ACTION_TYPE,
+  REGISTERED_SCHOOL,
+  calculateHaversineDistance,
+  evaluateTrustScore,
+  calculateCarbonSavings,
+  calculateEcoPoints,
 } from './constants';
 
-// ── Normalise a raw backend submission doc ────────────────────────────────────
-// The backend returns action_type, impact_kg_co2e, points_awarded, status, etc.
-// We map them to the field names the UI components were built with so we don't
-// have to touch every JSX file for data-field renames.
-function normalise(s) {
-  // Map backend action_type key → frontend short key (e.g. "waste_segregation" → "waste")
-  const activityFe = FRONTEND_ACTION_TYPE[s.action_type] || s.action_type;
-  const factor = EMISSION_FACTORS[activityFe] || {};
-
-  // Backend photo_url is a relative path like "/uploads/<file>" — prefix the API base
-  const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-  const photoUrl = s.photo_url
-    ? s.photo_url.startsWith('http') ? s.photo_url : `${API_BASE}${s.photo_url}`
-    : '';
-
-  // Friendly status: backend uses "needs_review"; the UI was built with "review"
-  const status =
-    s.status === 'needs_review' ? 'review' :
-    s.status === 'verified'     ? 'verified' :
-    s.status === 'rejected'     ? 'rejected' :
-    'pending';
-
-  // AI reason text from verification pipeline
-  const ai_reason =
-    Array.isArray(s.verification_reasons) ? s.verification_reasons.join('. ') : '';
-
-  return {
-    // ── Identity ──
-    id: s.id || String(s._id),
-    student_id: s.student_id,
-    // Aliases used in various components
-    user_id: s.student_id,
-    student_email: s.student_id,
-    student_name: s.student_name || s.student_id,
-
-    // ── Action metadata ──
-    activity: activityFe,           // short frontend key
-    action_type: s.action_type,     // original backend key
-    quantity: s.quantity ?? 1,
-    unit: factor.unit || 'units',
-
-    // ── Impact ──
-    co2_saved: s.impact_kg_co2e ?? 0,
-    impact_kg_co2e: s.impact_kg_co2e ?? 0,
-    points: s.points_awarded ?? 0,
-    points_awarded: s.points_awarded ?? 0,
-
-    // ── Location ──
-    location_type: s.context || 'school',
-    latitude: s.location?.lat ?? 0,
-    longitude: s.location?.lng ?? 0,
-    distance_meters: null,          // not returned from backend
-
-    // ── Media ──
-    photo_url: photoUrl,
-    photo_hash: s.photo_hash || '',
-
-    // ── Verification ──
-    status,
-    trust_score: s.trust_score ?? null,
-    reviewed_by: s.reviewed_by || null,
-    reviewed_at: s.reviewed_at || null,
-    ai_reason,
-    verification_reasons: s.verification_reasons || [],
-
-    // ── Timestamps ──
-    created_at: s.created_at || new Date().toISOString(),
-
-    // ── Class / house (embedded in notes for legacy; backend stores on student profile) ──
-    student_class: s.student_class || '',
-    student_house: s.student_house || '',
-  };
-}
-
-// ── Hook ──────────────────────────────────────────────────────────────────────
-export function useSubmissions(role = 'student') {
+export function useSubmissions(token) {
   const [submissions, setSubmissions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Students fetch their own; teachers/admins fetch the review queue
   const fetchSubmissions = useCallback(async () => {
+    if (!token) {
+      setSubmissions([]);
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
       setError(null);
-
-      let raw;
-      if (role === 'student') {
-        raw = await apiMySubmissions(100);
-      } else {
-        // teacher / admin: pull review queue + (if the backend ever adds GET /submissions) fall back
-        raw = await apiReviewQueue();
-      }
-
-      setSubmissions((raw || []).map(normalise));
+      const data = await apiGetSubmissions(token);
+      // Normalise class/house if they arrive embedded in a note string
+      const enriched = (data || []).map((s) => {
+        let student_class = s.student_class || 'Class 11-A';
+        let student_house = s.student_house || 'Terra';
+        if (s.note && s.note.includes('[Class:')) {
+          const classMatch = s.note.match(/\[Class:\s*([^|\]]+)/);
+          const houseMatch = s.note.match(/House:\s*([^\]]+)/);
+          if (classMatch) student_class = classMatch[1].trim();
+          if (houseMatch) student_house = houseMatch[1].trim().replace(' House', '');
+        }
+        return { ...s, student_class, student_house };
+      });
+      setSubmissions(enriched);
     } catch (err) {
-      console.error('Error loading submissions from backend:', err);
+      console.error('Error loading submissions:', err);
       setError(err.message || 'Failed to fetch submissions');
-      setSubmissions([]);
     } finally {
       setLoading(false);
     }
-  }, [role]);
+  }, [token]);
 
   useEffect(() => {
     fetchSubmissions();
   }, [fetchSubmissions]);
 
-  // ── Add a new submission ────────────────────────────────────────────────────
   /**
-   * @param {object} opts
-   * @param {object} opts.user          - from useAuth()
-   * @param {string} opts.activityId    - frontend short key e.g. 'waste'
-   * @param {number} opts.quantity
-   * @param {string} opts.locationType  - 'school' | 'home'
-   * @param {number} opts.latitude
-   * @param {number} opts.longitude
-   * @param {string} opts.capturedTime  - ISO string
-   * @param {File}   opts.file          - actual File object from <input>
+   * Add a new student submission.
+   *
+   * `file` MUST be the original File object from the <input type="file"> element
+   * so the backend can receive the image binary over multipart/form-data.
+   *
+   * Client-side trust scoring and carbon calculations still run before sending
+   * so the success screen can show instant feedback.
    */
   const addSubmission = async ({
     user,
@@ -138,43 +81,61 @@ export function useSubmissions(role = 'student') {
     locationType,
     latitude,
     longitude,
+    file,           // raw File object — required for multipart upload
+    photoHash,
+    note = '',
     capturedTime,
-    file,
   }) => {
-    if (!file) throw new Error('A photo file is required to submit an action.');
-
-    const backendActionType = BACKEND_ACTION_TYPE[activityId];
-    if (!backendActionType) throw new Error(`Unknown action type: ${activityId}`);
-
-    const result = await apiCreateSubmission({
-      student_id: user.student_id || user.id,
-      school_id: user.school_id,
-      action_type: backendActionType,
-      context: locationType,
+    const numQuantity = Number(quantity);
+    const distanceMeters = calculateHaversineDistance(
       latitude,
       longitude,
-      captured_at: capturedTime || new Date().toISOString(),
-      quantity,
-      photo: file,
-    });
-
-    // Refresh the list after a successful submission
-    await fetchSubmissions();
-    return result; // { id, status: "pending" }
-  };
-
-  // ── Review a submission (teacher/admin) ────────────────────────────────────
-  const reviewSubmission = async (submissionId, decision, reviewerName = 'School Admin') => {
-    const result = await apiReviewSubmission(
-      submissionId,
-      decision === 'approve' ? 'approve' : 'reject',
-      reviewerName,
+      REGISTERED_SCHOOL.latitude,
+      REGISTERED_SCHOOL.longitude,
     );
+    const trustEval = evaluateTrustScore({
+      locationType,
+      distanceMeters,
+      hoursAgo: 0.2,
+    });
+    const co2Saved = calculateCarbonSavings(activityId, numQuantity);
+    const points = calculateEcoPoints(co2Saved);
+
+    const fields = {
+      activity: activityId,
+      quantity: numQuantity,
+      unit: EMISSION_FACTORS[activityId]?.unit || 'units',
+      co2_saved: co2Saved,
+      points,
+      location_type: locationType,
+      latitude: Number(latitude),
+      longitude: Number(longitude),
+      distance_meters: distanceMeters,
+      photo_hash: photoHash,
+      trust_score: trustEval.score,
+      status: trustEval.status,
+      note: note
+        ? `${note} [Class: ${user?.studentClass || user?.student_class || 'Class 11-A'} | House: ${user?.studentHouse || user?.student_house || 'Terra'}]`
+        : `[Class: ${user?.studentClass || user?.student_class || 'Class 11-A'} | House: ${user?.studentHouse || user?.student_house || 'Terra'}]`,
+      captured_at: capturedTime || new Date().toISOString(),
+    };
+
+    const result = await apiSubmitAction({ file, fields, token });
     await fetchSubmissions();
     return result;
   };
 
-  // ── Export CSV from current in-memory list ─────────────────────────────────
+  /**
+   * Admin/teacher review action.
+   * decision: 'approve' | 'reject'
+   */
+  const reviewSubmission = async (id, decision, reviewerName = 'School Admin') => {
+    const result = await apiReviewSubmission(id, decision, reviewerName, token);
+    await fetchSubmissions();
+    return result;
+  };
+
+  // Export CSV compliance report from in-memory submissions
   const exportComplianceCSV = () => {
     if (!submissions || submissions.length === 0) {
       alert('No recorded submissions available to export yet.');
@@ -183,7 +144,8 @@ export function useSubmissions(role = 'student') {
 
     const headers = [
       'Action ID',
-      'Student ID',
+      'Student Name',
+      'Student Email',
       'Activity',
       'Quantity',
       'Unit',
@@ -192,7 +154,9 @@ export function useSubmissions(role = 'student') {
       'Location Type',
       'Latitude',
       'Longitude',
-      'Confidence Score',
+      'Distance to School (m)',
+      'Photo Evidence ID',
+      'Confidence Score (0-1)',
       'Verification Status',
       'Reviewer',
       'Recorded Timestamp',
@@ -200,8 +164,9 @@ export function useSubmissions(role = 'student') {
 
     const rows = submissions.map((sub) => [
       sub.id,
-      sub.student_id,
-      sub.action_type,
+      `"${sub.student_name}"`,
+      sub.student_email,
+      sub.activity,
       sub.quantity,
       sub.unit,
       sub.co2_saved,
@@ -209,36 +174,36 @@ export function useSubmissions(role = 'student') {
       sub.location_type,
       sub.latitude,
       sub.longitude,
-      sub.trust_score ?? '',
+      sub.distance_meters,
+      sub.photo_hash,
+      sub.trust_score,
       sub.status,
       `"${sub.reviewed_by || 'Pending Review'}"`,
       sub.created_at,
     ]);
 
-    const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = url;
-    link.download = `EcoMesh_Ledger_${Date.now()}.csv`;
+    link.setAttribute('href', url);
+    link.setAttribute('download', `EcoMesh_Verified_Carbon_Ledger_${Date.now()}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  // ── Derived data ────────────────────────────────────────────────────────────
+  // Derived aggregates computed from in-memory data (same as before)
   const verifiedOnly = submissions.filter((s) => s.status === 'verified');
-  const reviewOnly   = submissions.filter((s) => s.status === 'review');
-  const pendingOnly  = submissions.filter((s) => s.status === 'pending');
+  const reviewOnly = submissions.filter((s) => s.status === 'review');
 
   const totalCO2 = Number(
-    verifiedOnly.reduce((acc, s) => acc + (s.co2_saved || 0), 0).toFixed(2)
+    verifiedOnly.reduce((acc, curr) => acc + (Number(curr.co2_saved) || 0), 0).toFixed(2),
   );
   const totalActions = verifiedOnly.length;
-  const totalPoints  = verifiedOnly.reduce((acc, s) => acc + (s.points || 0), 0);
-  const totalPendingReviews = reviewOnly.length + pendingOnly.length;
+  const totalPoints = verifiedOnly.reduce((acc, curr) => acc + (Number(curr.points) || 0), 0);
+  const totalPendingReviews = reviewOnly.length;
 
-  // Category breakdown for charts
   const categoryMap = {};
   Object.keys(EMISSION_FACTORS).forEach((cat) => {
     categoryMap[cat] = {
@@ -250,7 +215,7 @@ export function useSubmissions(role = 'student') {
   });
   verifiedOnly.forEach((s) => {
     if (categoryMap[s.activity]) {
-      categoryMap[s.activity].co2 += s.co2_saved || 0;
+      categoryMap[s.activity].co2 += Number(s.co2_saved) || 0;
       categoryMap[s.activity].count += 1;
     }
   });

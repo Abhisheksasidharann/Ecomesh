@@ -16,11 +16,10 @@ import ImpactCalculator from './components/ImpactCalculator';
 import StudentCertificate from './components/StudentCertificate';
 
 export default function App() {
-  const { user, loading: authLoading, isAuthenticated } = useAuth();
+  const { user, token, loading: authLoading, isAuthenticated } = useAuth();
   const [activeTab, setActiveTab] = useState('dashboard');
 
-  const role = user?.role || 'student';
-
+  // token is passed so useSubmissions can call the authenticated API
   const {
     submissions,
     verifiedOnly,
@@ -33,8 +32,7 @@ export default function App() {
     addSubmission,
     reviewSubmission,
     exportComplianceCSV,
-    refreshSubmissions,
-  } = useSubmissions(role);
+  } = useSubmissions(token);
 
   if (authLoading) {
     return (
@@ -69,7 +67,7 @@ export default function App() {
     return <AuthPage onAuthSuccess={() => setActiveTab('dashboard')} />;
   }
 
-  // role is declared above, near useSubmissions
+  const role = user?.role || 'student';
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex' }}>
@@ -117,6 +115,7 @@ export default function App() {
           <MissionsHub
             verifiedOnly={verifiedOnly}
             totalPoints={totalPoints}
+            token={token}
             onNavigateUpload={() => setActiveTab('upload')}
           />
         )}
@@ -124,7 +123,9 @@ export default function App() {
         {/* 4. Campus Leaderboard (STUDENT ONLY) */}
         {activeTab === 'leaderboard' && role === 'student' && (
           <Leaderboard
+            submissions={submissions}
             totalCO2={totalCO2}
+            token={token}
           />
         )}
 
@@ -133,7 +134,6 @@ export default function App() {
           <MyHistory
             submissions={submissions}
             onNavigateUpload={() => setActiveTab('upload')}
-            onRefresh={refreshSubmissions}
           />
         )}
 
@@ -164,15 +164,15 @@ export default function App() {
           <HowItWorks />
         )}
 
-        {/* 8. Teacher Review Desk (TEACHER / ADMIN ONLY) */}
-        {activeTab === 'admin' && (role === 'admin' || role === 'teacher') && (
+        {/* 10. Teacher Review Desk (TEACHER / ADMIN ONLY) */}
+        {activeTab === 'admin' && role === 'admin' && (
           <AdminReview
             reviewOnly={reviewOnly}
             onReviewAction={reviewSubmission}
           />
         )}
 
-        {/* 9. School & Community Benefits (TEACHER & SPONSOR ONLY) */}
+        {/* 11. School & Community Benefits (TEACHER & SPONSOR ONLY) */}
         {activeTab === 'benefits' && (role === 'admin' || role === 'sponsor') && (
           <CommunityBenefits
             totalCO2={totalCO2}

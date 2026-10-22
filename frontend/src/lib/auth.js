@@ -1,172 +1,146 @@
-import { useState, useEffect, useCallback } from 'react';
-import {
-  apiLogin,
-  apiSignup,
-  apiMe,
-  saveToken,
-  getToken,
-  clearToken,
-} from './api';
-import { DEFAULT_SCHOOL_ID } from './constants';
-
-// ── Token decode (no library needed; JWT payload is plain base64) ─────────────
-function decodeToken(token) {
-  try {
-    const b64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
-    return JSON.parse(atob(b64));
-  } catch {
-    return null;
-  }
-}
-
-function isExpired(payload) {
-  if (!payload?.exp) return true;
-  // exp is in seconds; add a 10-second buffer
-  return Date.now() / 1000 > payload.exp - 10;
-}
-
-// ── Public auth functions ──────────────────────────────────────────────────────
-
 /**
- * Sign up a new student account.
- * username = their chosen username (used as student_id in the backend)
+ * JWT-based authentication for the EcoMesh FastAPI backend.
+ *
+ * Replaces the previous Supabase auth module while keeping the same
+ * public surface so all existing components continue to work unchanged:
+ *   - useAuth() → { user, profile, loading, isAuthenticated, signIn, signUp, signOut, token }
+ *   - signIn(email, password) → resolves on success, throws on failure
+ *   - signUp({ email, password, name, role, school, studentClass, studentHouse })
+ *   - signOut()
+ *
+ * The JWT access token is stored in sessionStorage (cleared on tab close).
+ * Only the token string is persisted — never passwords or raw secrets.
  */
+
+import { useState, useEffect, useCallback } from 'react';
+import { apiLogin, apiRegister, apiMe } from './api';
+
+const TOKEN_KEY = 'ecomesh_access_token';
+
+// ---------------------------------------------------------------------------
+// Standalone helpers (called from AuthPage and other places that imported them)
+// ---------------------------------------------------------------------------
+
+export async function signIn(email, password) {
+  const data = await apiLogin(email, password);
+  // FastAPI OAuth2: { access_token, token_type }
+  const token = data.access_token;
+  sessionStorage.setItem(TOKEN_KEY, token);
+  return token;
+}
+
 export async function signUp({
-  username,
+  email,
   password,
   name,
-  school_id = DEFAULT_SCHOOL_ID,
-  studentClass = '10A',
-  studentHouse = '',
+  role = 'student',
+  school = 'Model Higher Secondary School',
+  studentClass = 'Class 11-A',
+  studentHouse = 'Terra House',
 }) {
-  const data = await apiSignup({
-    username,
-    password,
-    name,
-    school_id,
-    class_name: studentClass,
-    house: studentHouse,
-  });
-  return data; // { username, student_id, role }
+  await apiRegister({ email, password, name, role, school, studentClass, studentHouse });
+  // Auto sign-in after successful registration
+  return signIn(email, password);
 }
 
-/**
- * Sign in and save JWT to localStorage.
- * Returns the raw login response: { access_token, role, school_id, student_id }
- */
-export async function signIn(username, password) {
-  const data = await apiLogin({ username, password });
-  saveToken(data.access_token);
-  return data;
-}
-
-/** Sign out — just clear the local token. No backend call needed. */
 export function signOut() {
-  clearToken();
+  sessionStorage.removeItem(TOKEN_KEY);
 }
 
-// ── useAuth hook ──────────────────────────────────────────────────────────────
-/**
- * Drop-in replacement for the Supabase useAuth hook.
- * Reads the JWT from localStorage, validates it, and if valid fetches /auth/me
- * to get the full user object.
- *
- * Returned `user` shape:
- *  {
- *    username, role, school_id, student_id,
- *    name, studentClass, studentHouse,
- *    // convenience aliases
- *    id: student_id,
- *    email: username,
- *  }
- */
+// ---------------------------------------------------------------------------
+// useAuth hook — keeps the same interface as the Supabase version
+// ---------------------------------------------------------------------------
+
 export function useAuth() {
+  const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY) || null);
   const [user, setUser] = useState(null);
+  const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  const loadUser = useCallback(async () => {
-    const token = getToken();
-    if (!token) {
+  // Fetch the current user profile from /auth/me whenever the token changes
+  const loadMe = useCallback(async (accessToken) => {
+    if (!accessToken) {
       setUser(null);
+      setProfile(null);
       setLoading(false);
       return;
     }
-
-    const payload = decodeToken(token);
-    if (!payload || isExpired(payload)) {
-      clearToken();
-      setUser(null);
-      setLoading(false);
-      return;
-    }
-
     try {
-      // /auth/me returns { username, role, school_id, student_id }
-      const me = await apiMe();
-      setUser(buildUser(me));
+      const me = await apiMe(accessToken);
+      // Backend returns a user object; normalise it to the shape the rest of the
+      // app expects (same field names used by all components).
+      const normalised = {
+        id: me.id,
+        email: me.email,
+        name: me.name || me.email?.split('@')[0] || 'User',
+        role: me.role || 'student',
+        school: me.school || 'Model Higher Secondary School',
+        studentClass: me.student_class || me.studentClass || 'Class 11-A',
+        studentHouse: me.student_house || me.studentHouse || 'Terra House',
+        // Aliases used by various components
+        student_class: me.student_class || me.studentClass || 'Class 11-A',
+        student_house: me.student_house || me.studentHouse || 'Terra House',
+      };
+      setUser(normalised);
+      setProfile(normalised);
     } catch {
-      // Token rejected by server (revoked, tampered, etc.)
-      clearToken();
+      // Token is invalid or expired — clear it
+      sessionStorage.removeItem(TOKEN_KEY);
+      setToken(null);
       setUser(null);
+      setProfile(null);
     } finally {
       setLoading(false);
     }
   }, []);
 
+  // Initial load
   useEffect(() => {
-    loadUser();
-  }, [loadUser]);
+    loadMe(token);
+  }, [token, loadMe]);
 
-  // Expose a refreshUser so other components can call it after login
-  const refreshUser = loadUser;
+  // Listen for storage events (other tabs signing out)
+  useEffect(() => {
+    const handleStorage = (e) => {
+      if (e.key === TOKEN_KEY) {
+        const newToken = e.newValue;
+        setToken(newToken);
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
 
-  const handleSignIn = async (username, password) => {
-    await signIn(username, password);
-    await loadUser();
+  // Wrapped signIn that also updates local state
+  const handleSignIn = async (email, password) => {
+    const accessToken = await signIn(email, password);
+    setToken(accessToken);
+    await loadMe(accessToken);
   };
 
+  // Wrapped signUp that also updates local state
+  const handleSignUp = async (params) => {
+    const accessToken = await signUp(params);
+    setToken(accessToken);
+    await loadMe(accessToken);
+  };
+
+  // Wrapped signOut that also clears local state
   const handleSignOut = () => {
     signOut();
+    setToken(null);
     setUser(null);
+    setProfile(null);
   };
 
   return {
     user,
+    profile,
     loading,
+    token,
     isAuthenticated: !!user,
     signIn: handleSignIn,
-    signUp,
+    signUp: handleSignUp,
     signOut: handleSignOut,
-    refreshUser,
-    // Legacy alias so components that still read profile work
-    profile: user,
-  };
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-/**
- * Shape the raw /auth/me payload into the richer user object the
- * rest of the app expects.
- */
-function buildUser(me) {
-  return {
-    // Backend fields
-    username: me.username,
-    role: me.role,
-    school_id: me.school_id || DEFAULT_SCHOOL_ID,
-    student_id: me.student_id || me.username,
-
-    // Convenience aliases used across components
-    id: me.student_id || me.username,
-    email: me.username,                         // some components still read user.email
-    name: me.name || me.username,
-
-    // Class & house come from /students/{id}/summary; seeded with defaults here.
-    // App.jsx or Dashboard can overwrite these once the student summary loads.
-    studentClass: me.class_name || me.studentClass || '',
-    studentHouse: me.house || me.studentHouse || '',
-    student_class: me.class_name || me.studentClass || '',
-    student_house: me.house || me.studentHouse || '',
   };
 }

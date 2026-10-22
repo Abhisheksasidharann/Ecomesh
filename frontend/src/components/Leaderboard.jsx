@@ -1,86 +1,63 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../lib/auth';
-import { Trophy, Shield, Sun, Users, Award, Sparkles, Building, ChevronRight } from 'lucide-react';
-import { REGISTERED_SCHOOL, SCHOOL_HOUSES, SCHOOL_CLASSES, SCHOOL_GOAL, DEFAULT_SCHOOL_ID } from '../lib/constants';
-import { apiLeaderboard, apiSchoolImpact } from '../lib/api';
+import { apiLeaderboardHouses, apiLeaderboardClasses, apiLeaderboardMyClass, apiSchoolImpact } from '../lib/api';
+import { Trophy, Shield, Sun, Sparkles, Loader2, AlertCircle } from 'lucide-react';
+import { SCHOOL_HOUSES, SCHOOL_CLASSES, SCHOOL_GOAL } from '../lib/constants';
 
-export default function Leaderboard({ totalCO2 = 0 }) {
+export default function Leaderboard({ submissions = [], totalCO2: totalCO2Prop = 0, token }) {
   const { user } = useAuth();
-  const [activeView, setActiveView] = useState('houses');
+  const [activeView, setActiveView] = useState('houses'); // 'houses' | 'classes' | 'my-class'
 
-  // ── Live data from backend leaderboard endpoint ──────────────────────────
-  const [houseData, setHouseData]   = useState([]);
-  const [classData, setClassData]   = useState([]);
-  const [studentData, setStudentData] = useState([]);
-  const [schoolCO2, setSchoolCO2]   = useState(totalCO2);
-  const [loadingBoard, setLoadingBoard] = useState(true);
+  // Live data from backend (null = not yet loaded / endpoint unavailable)
+  const [liveHouses, setLiveHouses] = useState(null);
+  const [liveClasses, setLiveClasses] = useState(null);
+  const [liveMyClass, setLiveMyClass] = useState(null);
+  const [liveSchoolCO2, setLiveSchoolCO2] = useState(null);
+  const [liveLoading, setLiveLoading] = useState(true);
+  const [liveError, setLiveError] = useState('');
 
-  const schoolId = user?.school_id || DEFAULT_SCHOOL_ID;
-
-  useEffect(() => {
-    async function loadAll() {
-      setLoadingBoard(true);
-      try {
-        const [houses, classes, students, impact] = await Promise.all([
-          apiLeaderboard(schoolId, 'house', 20).catch(() => []),
-          apiLeaderboard(schoolId, 'class', 20).catch(() => []),
-          apiLeaderboard(schoolId, 'student', 30).catch(() => []),
-          apiSchoolImpact(schoolId).catch(() => null),
-        ]);
-
-        // Map backend house rows → the shape the UI expects
-        const houseRows = SCHOOL_HOUSES.map((h) => {
-          // Backend returns { house: "Green", points, kg_co2e, students }
-          const row = houses.find(
-            (r) => (r.house || '').toLowerCase() === h.id ||
-                   (r.house || '').toLowerCase() === h.name.toLowerCase()
-          ) || {};
-          return {
-            ...h,
-            co2: Number((row.kg_co2e || 0).toFixed(1)),
-            points: row.points || 0,
-            actionsCount: row.actions || 0,
-            studentCount: row.students || 0,
-          };
-        }).sort((a, b) => b.co2 - a.co2);
-
-        // Map backend class rows → UI shape
-        const classRows = classes.map((r) => ({
-          name: r.class_name || r.class || r._id || 'Unknown',
-          co2: Number((r.kg_co2e || 0).toFixed(1)),
-          points: r.points || 0,
-          actionsCount: r.actions || 0,
-          studentCount: r.students || 0,
-        })).sort((a, b) => b.co2 - a.co2);
-
-        // Student rows (already ranked by backend)
-        const studentRows = students.map((r, idx) => ({
-          rank: r.rank || idx + 1,
-          name: r.name || 'Student',
-          safeName: formatSafeName(r.name || 'Student'),
-          class_name: r.class_name || '',
-          co2: Number((r.kg_co2e || 0).toFixed(1)),
-          points: r.points || 0,
-          level: r.level || 'Seedling',
-        }));
-
-        setHouseData(houseRows);
-        setClassData(classRows);
-        setStudentData(studentRows);
-        if (impact) setSchoolCO2(impact.total_kg_co2e || 0);
-      } catch (err) {
-        console.error('Leaderboard load error:', err);
-      } finally {
-        setLoadingBoard(false);
+  const fetchLive = useCallback(async () => {
+    if (!token) { setLiveLoading(false); return; }
+    try {
+      setLiveLoading(true);
+      setLiveError('');
+      const [houses, classes, myClass, impact] = await Promise.allSettled([
+        apiLeaderboardHouses(token),
+        apiLeaderboardClasses(token),
+        apiLeaderboardMyClass(token),
+        apiSchoolImpact(token),
+      ]);
+      if (houses.status === 'fulfilled' && Array.isArray(houses.value) && houses.value.length > 0) {
+        setLiveHouses(houses.value);
       }
+      if (classes.status === 'fulfilled' && Array.isArray(classes.value) && classes.value.length > 0) {
+        setLiveClasses(classes.value);
+      }
+      if (myClass.status === 'fulfilled' && Array.isArray(myClass.value)) {
+        setLiveMyClass(myClass.value);
+      }
+      if (impact.status === 'fulfilled' && impact.value?.total_co2 != null) {
+        setLiveSchoolCO2(Number(impact.value.total_co2));
+      }
+    } catch {
+      setLiveError('Could not load live leaderboard data. Showing local data.');
+    } finally {
+      setLiveLoading(false);
     }
-    loadAll();
-  }, [schoolId]);
+  }, [token]);
 
-  const userClass    = user?.studentClass || user?.student_class || '';
-  const userHouseId  = (user?.studentHouse || user?.student_house || '').toLowerCase().split(' ')[0];
+  useEffect(() => { fetchLive(); }, [fetchLive]);
 
-  // Helper: Mask name for minor child safety (e.g. "Abhishek Sasidharan" → "Abhishek S.")
+  // Use live backend data when available, else fall back to local computation
+  const totalCO2 = liveSchoolCO2 ?? totalCO2Prop;
+
+  // Filter only verified submissions
+  const verified = submissions.filter((s) => s.status === 'verified');
+
+  const userClass = user?.student_class || user?.class || 'Class 11-A';
+  const userHouseId = (user?.student_house || user?.house || 'terra').toLowerCase();
+
+  // Helper: Mask name for minor child safety (e.g. "Abhishek Sasidharan" -> "Abhishek S.")
   const formatSafeName = (fullName) => {
     if (!fullName) return 'Student';
     const parts = fullName.trim().split(' ');
@@ -88,18 +65,100 @@ export default function Leaderboard({ totalCO2 = 0 }) {
     return `${parts[0]} ${parts[parts.length - 1][0]}.`;
   };
 
-  // My class students for the "My Class" tab (scoped from student list)
-  const myClassStudents = studentData
-    .filter((s) => s.class_name === userClass)
-    .map((s, idx) => ({ ...s, rank: idx + 1 }));
+  // 1. Calculate House Standings
+  const houseData = SCHOOL_HOUSES.map((h) => {
+    const houseSubs = verified.filter(
+      (s) => (s.student_house || '').toLowerCase() === h.id || (s.house || '').toLowerCase() === h.id
+    );
+    const co2 = houseSubs.reduce((sum, s) => sum + (Number(s.co2_saved) || 0), 0);
+    const points = houseSubs.reduce((sum, s) => sum + (Number(s.points) || 0), 0);
+    const studentCount = new Set(houseSubs.map((s) => s.student_email || s.user_id)).size;
 
-  const myRankObj = myClassStudents.find(
-    (s) => s.student_id === user?.student_id || s.name === user?.name
+    return {
+      ...h,
+      co2: Number(co2.toFixed(1)),
+      points,
+      actionsCount: houseSubs.length,
+      studentCount,
+    };
+  }).sort((a, b) => b.co2 - a.co2);
+
+  // 2. Calculate Class Standings
+  const classData = SCHOOL_CLASSES.map((cls) => {
+    const classSubs = verified.filter(
+      (s) => s.student_class === cls || s.class === cls
+    );
+    const co2 = classSubs.reduce((sum, s) => sum + (Number(s.co2_saved) || 0), 0);
+    const points = classSubs.reduce((sum, s) => sum + (Number(s.points) || 0), 0);
+    const studentCount = new Set(classSubs.map((s) => s.student_email || s.user_id)).size;
+
+    return {
+      name: cls,
+      co2: Number(co2.toFixed(1)),
+      points,
+      actionsCount: classSubs.length,
+      studentCount,
+    };
+  }).sort((a, b) => b.co2 - a.co2);
+
+  // 3. Calculate Students in Current User's Class ONLY (Child Safety & Scoped Rank)
+  const myClassSubs = verified.filter(
+    (s) => s.student_class === userClass || s.class === userClass
   );
 
-  // School Goal Progress
-  const progressPercent = Math.min(100, Math.round((schoolCO2 / SCHOOL_GOAL.targetKg) * 100));
+  const myClassStudentsMap = {};
+  myClassSubs.forEach((s) => {
+    const key = s.student_email || s.user_id;
+    if (!myClassStudentsMap[key]) {
+      myClassStudentsMap[key] = {
+        name: s.student_name || 'Classmate',
+        email: s.student_email,
+        class: userClass,
+        house: s.student_house || 'Terra',
+        co2: 0,
+        points: 0,
+        actionsCount: 0,
+      };
+    }
+    myClassStudentsMap[key].co2 += Number(s.co2_saved) || 0;
+    myClassStudentsMap[key].points += Number(s.points) || 0;
+    myClassStudentsMap[key].actionsCount += 1;
+  });
 
+  // Ensure current user is in their class list even if 0 actions yet
+  if (user && !myClassStudentsMap[user.email]) {
+    myClassStudentsMap[user.email] = {
+      name: user.name || 'You',
+      email: user.email,
+      class: userClass,
+      house: user?.student_house || 'Terra',
+      co2: 0,
+      points: 0,
+      actionsCount: 0,
+    };
+  }
+
+  const myClassRanked = Object.values(myClassStudentsMap)
+    .sort((a, b) => b.co2 - a.co2)
+    .map((st, idx) => ({
+      ...st,
+      rank: idx + 1,
+      co2: Number(st.co2.toFixed(1)),
+      safeName: formatSafeName(st.name),
+    }));
+
+  const myRankObj = myClassRanked.find((s) => s.email === user?.email);
+
+  // Override local computations with live backend data when available
+  const effectiveHouseData = liveHouses ?? houseData;
+  const effectiveClassData = liveClasses ?? classData;
+  const effectiveMyClassRanked = liveMyClass ?? myClassRanked;
+  const effectiveMyRankObj = liveMyClass
+    ? liveMyClass.find((s) => s.email === user?.email || s.is_me === true)
+    : myRankObj;
+
+  // School Goal Progress
+  const progressPercent = Math.min(100, Math.round((totalCO2 / SCHOOL_GOAL.targetKg) * 100));
 
   return (
     <div className="page-container gradient-mesh">
@@ -148,6 +207,34 @@ export default function Leaderboard({ totalCO2 = 0 }) {
         </span>
       </div>
 
+      {/* Live data error notice (soft — doesn't block UI) */}
+      {liveError && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          padding: '10px 16px',
+          borderRadius: '10px',
+          backgroundColor: '#fffbeb',
+          border: '1px solid #fde68a',
+          marginBottom: '16px',
+          fontSize: '0.83rem',
+          color: '#92400e',
+        }}>
+          <AlertCircle size={16} color="#d97706" />
+          <span>{liveError}</span>
+        </div>
+      )}
+
+      {/* Live data loading indicator */}
+      {liveLoading && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', fontSize: '0.83rem', color: '#64748b' }}>
+          <Loader2 size={16} style={{ animation: 'spin 0.8s linear infinite' }} />
+          <span>Fetching live standings…</span>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
+
       {/* School Solar Rooftop Centerpiece */}
       <div className="glass-card" style={{
         marginBottom: '32px',
@@ -178,7 +265,7 @@ export default function Leaderboard({ totalCO2 = 0 }) {
 
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontSize: '2rem', fontWeight: 900, color: '#fde047' }}>
-              {schoolCO2} / {SCHOOL_GOAL.targetKg} kg
+              {totalCO2} / {SCHOOL_GOAL.targetKg} kg
             </div>
             <div style={{ fontSize: '0.82rem', color: '#a7f3d0' }}>
               {progressPercent}% Milestone Achieved
@@ -266,7 +353,7 @@ export default function Leaderboard({ totalCO2 = 0 }) {
           }}
         >
           <span>👤 My Class Standings ({userClass})</span>
-          {myRankObj && (
+          {effectiveMyRankObj && (
             <span style={{
               backgroundColor: '#10b981',
               color: '#ffffff',
@@ -275,7 +362,7 @@ export default function Leaderboard({ totalCO2 = 0 }) {
               padding: '2px 8px',
               borderRadius: '9999px',
             }}>
-              Rank #{myRankObj.rank}
+              Rank #{effectiveMyRankObj.rank}
             </span>
           )}
         </button>
@@ -289,7 +376,7 @@ export default function Leaderboard({ totalCO2 = 0 }) {
           gap: '20px',
           marginBottom: '32px',
         }}>
-          {houseData.map((h, idx) => {
+          {effectiveHouseData.map((h, idx) => {
             const isUserHouse = h.id === userHouseId;
             return (
               <div
@@ -391,7 +478,7 @@ export default function Leaderboard({ totalCO2 = 0 }) {
                 </tr>
               </thead>
               <tbody>
-                {classData.map((cls, idx) => {
+                {effectiveClassData.map((cls, idx) => {
                   const isCurrent = cls.name === userClass;
                   return (
                     <tr
@@ -460,7 +547,7 @@ export default function Leaderboard({ totalCO2 = 0 }) {
               </p>
             </div>
 
-            {myRankObj && (
+            {effectiveMyRankObj && (
               <div style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -474,7 +561,7 @@ export default function Leaderboard({ totalCO2 = 0 }) {
                 color: '#065f46',
               }}>
                 <Sparkles size={16} />
-                Your Rank in {userClass}: #{myRankObj.rank} of {myClassStudents.length}
+                Your Rank in {userClass}: #{effectiveMyRankObj.rank} of {effectiveMyClassRanked.length}
               </div>
             )}
           </div>
@@ -492,11 +579,11 @@ export default function Leaderboard({ totalCO2 = 0 }) {
                 </tr>
               </thead>
               <tbody>
-                {myClassStudents.map((st) => {
-                  const isCurrent = st.name === user?.name;
+                {effectiveMyClassRanked.map((st) => {
+                  const isCurrent = st.email === user?.email;
                   return (
                     <tr
-                      key={st.rank}
+                      key={st.email}
                       style={{
                         backgroundColor: isCurrent ? 'rgba(16, 185, 129, 0.08)' : 'transparent',
                         fontWeight: isCurrent ? 700 : 'normal',
@@ -528,7 +615,7 @@ export default function Leaderboard({ totalCO2 = 0 }) {
                       </td>
                       <td>
                         <span style={{ fontSize: '0.82rem', fontWeight: 600, color: '#475569' }}>
-                          {st.class_name || userClass}
+                          {st.house}
                         </span>
                       </td>
                       <td>{st.actionsCount} actions</td>
