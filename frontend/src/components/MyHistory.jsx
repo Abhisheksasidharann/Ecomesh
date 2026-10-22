@@ -1,16 +1,14 @@
 import React, { useState } from 'react';
-import { useAuth } from '../lib/auth';
 import { EMISSION_FACTORS } from '../lib/constants';
-import { Camera, CheckCircle2, Clock, XCircle, MapPin, Sparkles, Eye, Info, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Camera, CheckCircle2, Clock, XCircle, MapPin, Sparkles, Eye, Info, ShieldCheck, AlertCircle, RefreshCw } from 'lucide-react';
 
-export default function MyHistory({ submissions = [], onNavigateUpload }) {
-  const { user } = useAuth();
+export default function MyHistory({ submissions = [], onNavigateUpload, onRefresh }) {
   const [selectedPhoto, setSelectedPhoto] = useState(null);
   const [filter, setFilter] = useState('all');
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
-  const mySubmissions = submissions.filter(
-    (s) => s.student_email === user?.email || s.user_id === user?.id
-  );
+  // GET /my/submissions already returns only this student's data — no client-side filter needed
+  const mySubmissions = submissions;
 
   const filtered = mySubmissions.filter((sub) => {
     if (filter === 'all') return true;
@@ -106,10 +104,27 @@ export default function MyHistory({ submissions = [], onNavigateUpload }) {
           </p>
         </div>
 
-        <button onClick={onNavigateUpload} className="btn-primary">
-          <Camera size={18} />
-          Submit Action
-        </button>
+        <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+          {/* Refresh Status button — polls GET /my/submissions so pending items update */}
+          <button
+            onClick={async () => {
+              if (!onRefresh) return;
+              setIsRefreshing(true);
+              try { await onRefresh(); } finally { setIsRefreshing(false); }
+            }}
+            className="btn-secondary"
+            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '9px 16px', fontSize: '0.88rem' }}
+            title="Check for status updates on pending submissions"
+          >
+            <RefreshCw size={16} style={{ animation: isRefreshing ? 'spin 0.8s linear infinite' : 'none' }} />
+            {isRefreshing ? 'Checking...' : 'Check Status'}
+          </button>
+
+          <button onClick={onNavigateUpload} className="btn-primary">
+            <Camera size={18} />
+            Submit Action
+          </button>
+        </div>
       </div>
 
       {/* Points & Verification Breakdown Banner */}
