@@ -194,6 +194,7 @@ export default function UploadAction({ onSubmissionAdded, onCancel }) {
         locationType,
         latitude,
         longitude,
+        file,        // raw File object for multipart backend upload
         photoHash,
         photoUrl,
         note,

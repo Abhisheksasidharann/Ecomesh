@@ -1,5 +1,33 @@
-import { useState, useEffect } from 'react';
-import { supabase } from './supabaseClient';
+/**
+ * JWT-based authentication for the EcoMesh FastAPI backend.
+ *
+ * Replaces the previous Supabase auth module while keeping the same
+ * public surface so all existing components continue to work unchanged:
+ *   - useAuth() → { user, profile, loading, isAuthenticated, signIn, signUp, signOut, token }
+ *   - signIn(email, password) → resolves on success, throws on failure
+ *   - signUp({ email, password, name, role, school, studentClass, studentHouse })
+ *   - signOut()
+ *
+ * The JWT access token is stored in sessionStorage (cleared on tab close).
+ * Only the token string is persisted — never passwords or raw secrets.
+ */
+
+import { useState, useEffect, useCallback } from 'react';
+import { apiLogin, apiRegister, apiMe } from './api';
+
+const TOKEN_KEY = 'ecomesh_access_token';
+
+// ---------------------------------------------------------------------------
+// Standalone helpers (called from AuthPage and other places that imported them)
+// ---------------------------------------------------------------------------
+
+export async function signIn(email, password) {
+  const data = await apiLogin(email, password);
+  // FastAPI OAuth2: { access_token, token_type }
+  const token = data.access_token;
+  sessionStorage.setItem(TOKEN_KEY, token);
+  return token;
+}
 
 export async function signUp({
   email,
@@ -10,137 +38,109 @@ export async function signUp({
   studentClass = 'Class 11-A',
   studentHouse = 'Terra House',
 }) {
-  const cleanEmail = email.toLowerCase().trim();
-  
-  const { data: authData, error: authError } = await supabase.auth.signUp({
-    email: cleanEmail,
-    password,
-    options: {
-      data: {
-        name,
-        role,
-        school,
-        studentClass,
-        studentHouse,
-      },
-    },
-  });
-
-  if (authError) throw authError;
-
-  if (authData.user) {
-    const { error: profileError } = await supabase.from('profiles').upsert({
-      id: authData.user.id,
-      name,
-      email: cleanEmail,
-      role,
-      school,
-    });
-    if (profileError) console.error('Profile creation error:', profileError);
-  }
-
-  return authData;
+  await apiRegister({ email, password, name, role, school, studentClass, studentHouse });
+  // Auto sign-in after successful registration
+  return signIn(email, password);
 }
 
-export async function signIn(email, password) {
-  const cleanEmail = email.toLowerCase().trim();
-  const { data, error } = await supabase.auth.signInWithPassword({
-    email: cleanEmail,
-    password,
-  });
-
-  if (error) throw error;
-  return data;
+export function signOut() {
+  sessionStorage.removeItem(TOKEN_KEY);
 }
 
-export async function signOut() {
-  const { error } = await supabase.auth.signOut();
-  if (error) throw error;
-}
+// ---------------------------------------------------------------------------
+// useAuth hook — keeps the same interface as the Supabase version
+// ---------------------------------------------------------------------------
 
 export function useAuth() {
+  const [token, setToken] = useState(() => sessionStorage.getItem(TOKEN_KEY) || null);
   const [user, setUser] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        setUser(session.user);
-        loadUserProfile(session.user.id, session.user.user_metadata);
-      } else {
-        setUser(null);
-        setProfile(null);
-        setLoading(false);
-      }
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (session?.user) {
-        setUser(session.user);
-        await loadUserProfile(session.user.id, session.user.user_metadata);
-      } else {
-        setUser(null);
-        setProfile(null);
-      }
+  // Fetch the current user profile from /auth/me whenever the token changes
+  const loadMe = useCallback(async (accessToken) => {
+    if (!accessToken) {
+      setUser(null);
+      setProfile(null);
       setLoading(false);
-    });
-
-    return () => {
-      subscription.unsubscribe();
-    };
-  }, []);
-
-  const loadUserProfile = async (userId, metadata = {}) => {
+      return;
+    }
     try {
-      const { data, error } = await supabase
-        .from('profiles')
-        .select('*')
-        .eq('id', userId)
-        .single();
-
-      if (data && !error) {
-        setProfile(data);
-      } else {
-        setProfile({
-          id: userId,
-          name: metadata?.name || 'Verified User',
-          email: metadata?.email || user?.email,
-          role: metadata?.role || 'student',
-          school: metadata?.school || 'Model Higher Secondary School',
-        });
-      }
+      const me = await apiMe(accessToken);
+      // Backend returns a user object; normalise it to the shape the rest of the
+      // app expects (same field names used by all components).
+      const normalised = {
+        id: me.id,
+        email: me.email,
+        name: me.name || me.email?.split('@')[0] || 'User',
+        role: me.role || 'student',
+        school: me.school || 'Model Higher Secondary School',
+        studentClass: me.student_class || me.studentClass || 'Class 11-A',
+        studentHouse: me.student_house || me.studentHouse || 'Terra House',
+        // Aliases used by various components
+        student_class: me.student_class || me.studentClass || 'Class 11-A',
+        student_house: me.student_house || me.studentHouse || 'Terra House',
+      };
+      setUser(normalised);
+      setProfile(normalised);
     } catch {
-      setProfile({
-        id: userId,
-        name: metadata?.name || 'Verified User',
-        email: metadata?.email || user?.email,
-        role: metadata?.role || 'student',
-        school: metadata?.school || 'Model Higher Secondary School',
-      });
+      // Token is invalid or expired — clear it
+      sessionStorage.removeItem(TOKEN_KEY);
+      setToken(null);
+      setUser(null);
+      setProfile(null);
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    loadMe(token);
+  }, [token, loadMe]);
+
+  // Listen for storage events (other tabs signing out)
+  useEffect(() => {
+    const handleStorage = (e) => {
+      if (e.key === TOKEN_KEY) {
+        const newToken = e.newValue;
+        setToken(newToken);
+      }
+    };
+    window.addEventListener('storage', handleStorage);
+    return () => window.removeEventListener('storage', handleStorage);
+  }, []);
+
+  // Wrapped signIn that also updates local state
+  const handleSignIn = async (email, password) => {
+    const accessToken = await signIn(email, password);
+    setToken(accessToken);
+    await loadMe(accessToken);
   };
 
-  const activeUser = user
-    ? {
-        ...user,
-        name: profile?.name || user.user_metadata?.name || user.email?.split('@')[0],
-        role: profile?.role || user.user_metadata?.role || 'student',
-        school: profile?.school || user.user_metadata?.school || 'Model Higher Secondary School',
-        studentClass: profile?.student_class || user.user_metadata?.studentClass || 'Class 11-A',
-        studentHouse: profile?.student_house || user.user_metadata?.studentHouse || 'Terra House',
-      }
-    : null;
+  // Wrapped signUp that also updates local state
+  const handleSignUp = async (params) => {
+    const accessToken = await signUp(params);
+    setToken(accessToken);
+    await loadMe(accessToken);
+  };
+
+  // Wrapped signOut that also clears local state
+  const handleSignOut = () => {
+    signOut();
+    setToken(null);
+    setUser(null);
+    setProfile(null);
+  };
 
   return {
-    user: activeUser,
+    user,
     profile,
     loading,
+    token,
     isAuthenticated: !!user,
-    signIn,
-    signUp,
-    signOut,
+    signIn: handleSignIn,
+    signUp: handleSignUp,
+    signOut: handleSignOut,
   };
 }

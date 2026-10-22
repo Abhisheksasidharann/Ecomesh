@@ -1,11 +1,55 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../lib/auth';
-import { Trophy, Shield, Sun, Users, Award, Sparkles, Building, ChevronRight } from 'lucide-react';
-import { REGISTERED_SCHOOL, SCHOOL_HOUSES, SCHOOL_CLASSES, SCHOOL_GOAL } from '../lib/constants';
+import { apiLeaderboardHouses, apiLeaderboardClasses, apiLeaderboardMyClass, apiSchoolImpact } from '../lib/api';
+import { Trophy, Shield, Sun, Sparkles, Loader2, AlertCircle } from 'lucide-react';
+import { SCHOOL_HOUSES, SCHOOL_CLASSES, SCHOOL_GOAL } from '../lib/constants';
 
-export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
+export default function Leaderboard({ submissions = [], totalCO2: totalCO2Prop = 0, token }) {
   const { user } = useAuth();
   const [activeView, setActiveView] = useState('houses'); // 'houses' | 'classes' | 'my-class'
+
+  // Live data from backend (null = not yet loaded / endpoint unavailable)
+  const [liveHouses, setLiveHouses] = useState(null);
+  const [liveClasses, setLiveClasses] = useState(null);
+  const [liveMyClass, setLiveMyClass] = useState(null);
+  const [liveSchoolCO2, setLiveSchoolCO2] = useState(null);
+  const [liveLoading, setLiveLoading] = useState(true);
+  const [liveError, setLiveError] = useState('');
+
+  const fetchLive = useCallback(async () => {
+    if (!token) { setLiveLoading(false); return; }
+    try {
+      setLiveLoading(true);
+      setLiveError('');
+      const [houses, classes, myClass, impact] = await Promise.allSettled([
+        apiLeaderboardHouses(token),
+        apiLeaderboardClasses(token),
+        apiLeaderboardMyClass(token),
+        apiSchoolImpact(token),
+      ]);
+      if (houses.status === 'fulfilled' && Array.isArray(houses.value) && houses.value.length > 0) {
+        setLiveHouses(houses.value);
+      }
+      if (classes.status === 'fulfilled' && Array.isArray(classes.value) && classes.value.length > 0) {
+        setLiveClasses(classes.value);
+      }
+      if (myClass.status === 'fulfilled' && Array.isArray(myClass.value)) {
+        setLiveMyClass(myClass.value);
+      }
+      if (impact.status === 'fulfilled' && impact.value?.total_co2 != null) {
+        setLiveSchoolCO2(Number(impact.value.total_co2));
+      }
+    } catch {
+      setLiveError('Could not load live leaderboard data. Showing local data.');
+    } finally {
+      setLiveLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => { fetchLive(); }, [fetchLive]);
+
+  // Use live backend data when available, else fall back to local computation
+  const totalCO2 = liveSchoolCO2 ?? totalCO2Prop;
 
   // Filter only verified submissions
   const verified = submissions.filter((s) => s.status === 'verified');
@@ -105,6 +149,14 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
 
   const myRankObj = myClassRanked.find((s) => s.email === user?.email);
 
+  // Override local computations with live backend data when available
+  const effectiveHouseData = liveHouses ?? houseData;
+  const effectiveClassData = liveClasses ?? classData;
+  const effectiveMyClassRanked = liveMyClass ?? myClassRanked;
+  const effectiveMyRankObj = liveMyClass
+    ? liveMyClass.find((s) => s.email === user?.email || s.is_me === true)
+    : myRankObj;
+
   // School Goal Progress
   const progressPercent = Math.min(100, Math.round((totalCO2 / SCHOOL_GOAL.targetKg) * 100));
 
@@ -154,6 +206,34 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
           <strong>Child Safety Shield:</strong> Leaderboards show First Name + Class initial only. Action photos are never public and viewable only by certified school teachers.
         </span>
       </div>
+
+      {/* Live data error notice (soft — doesn't block UI) */}
+      {liveError && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '10px',
+          padding: '10px 16px',
+          borderRadius: '10px',
+          backgroundColor: '#fffbeb',
+          border: '1px solid #fde68a',
+          marginBottom: '16px',
+          fontSize: '0.83rem',
+          color: '#92400e',
+        }}>
+          <AlertCircle size={16} color="#d97706" />
+          <span>{liveError}</span>
+        </div>
+      )}
+
+      {/* Live data loading indicator */}
+      {liveLoading && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '16px', fontSize: '0.83rem', color: '#64748b' }}>
+          <Loader2 size={16} style={{ animation: 'spin 0.8s linear infinite' }} />
+          <span>Fetching live standings…</span>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
 
       {/* School Solar Rooftop Centerpiece */}
       <div className="glass-card" style={{
@@ -273,7 +353,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
           }}
         >
           <span>👤 My Class Standings ({userClass})</span>
-          {myRankObj && (
+          {effectiveMyRankObj && (
             <span style={{
               backgroundColor: '#10b981',
               color: '#ffffff',
@@ -282,7 +362,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
               padding: '2px 8px',
               borderRadius: '9999px',
             }}>
-              Rank #{myRankObj.rank}
+              Rank #{effectiveMyRankObj.rank}
             </span>
           )}
         </button>
@@ -296,7 +376,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
           gap: '20px',
           marginBottom: '32px',
         }}>
-          {houseData.map((h, idx) => {
+          {effectiveHouseData.map((h, idx) => {
             const isUserHouse = h.id === userHouseId;
             return (
               <div
@@ -398,7 +478,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
                 </tr>
               </thead>
               <tbody>
-                {classData.map((cls, idx) => {
+                {effectiveClassData.map((cls, idx) => {
                   const isCurrent = cls.name === userClass;
                   return (
                     <tr
@@ -467,7 +547,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
               </p>
             </div>
 
-            {myRankObj && (
+            {effectiveMyRankObj && (
               <div style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -481,7 +561,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
                 color: '#065f46',
               }}>
                 <Sparkles size={16} />
-                Your Rank in {userClass}: #{myRankObj.rank} of {myClassRanked.length}
+                Your Rank in {userClass}: #{effectiveMyRankObj.rank} of {effectiveMyClassRanked.length}
               </div>
             )}
           </div>
@@ -499,7 +579,7 @@ export default function Leaderboard({ submissions = [], totalCO2 = 0 }) {
                 </tr>
               </thead>
               <tbody>
-                {myClassRanked.map((st) => {
+                {effectiveMyClassRanked.map((st) => {
                   const isCurrent = st.email === user?.email;
                   return (
                     <tr

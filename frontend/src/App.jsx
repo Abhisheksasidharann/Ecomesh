@@ -16,9 +16,10 @@ import ImpactCalculator from './components/ImpactCalculator';
 import StudentCertificate from './components/StudentCertificate';
 
 export default function App() {
-  const { user, loading: authLoading, isAuthenticated } = useAuth();
+  const { user, token, loading: authLoading, isAuthenticated } = useAuth();
   const [activeTab, setActiveTab] = useState('dashboard');
 
+  // token is passed so useSubmissions can call the authenticated API
   const {
     submissions,
     verifiedOnly,
@@ -31,7 +32,7 @@ export default function App() {
     addSubmission,
     reviewSubmission,
     exportComplianceCSV,
-  } = useSubmissions();
+  } = useSubmissions(token);
 
   if (authLoading) {
     return (
@@ -114,6 +115,7 @@ export default function App() {
           <MissionsHub
             verifiedOnly={verifiedOnly}
             totalPoints={totalPoints}
+            token={token}
             onNavigateUpload={() => setActiveTab('upload')}
           />
         )}
@@ -123,6 +125,7 @@ export default function App() {
           <Leaderboard
             submissions={submissions}
             totalCO2={totalCO2}
+            token={token}
           />
         )}
 
@@ -161,7 +164,7 @@ export default function App() {
           <HowItWorks />
         )}
 
-        {/* 8. Teacher Review Desk (TEACHER / ADMIN ONLY) */}
+        {/* 10. Teacher Review Desk (TEACHER / ADMIN ONLY) */}
         {activeTab === 'admin' && role === 'admin' && (
           <AdminReview
             reviewOnly={reviewOnly}
@@ -169,7 +172,7 @@ export default function App() {
           />
         )}
 
-        {/* 9. School & Community Benefits (TEACHER & SPONSOR ONLY) */}
+        {/* 11. School & Community Benefits (TEACHER & SPONSOR ONLY) */}
         {activeTab === 'benefits' && (role === 'admin' || role === 'sponsor') && (
           <CommunityBenefits
             totalCO2={totalCO2}
