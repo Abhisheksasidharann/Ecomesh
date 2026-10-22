@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pymongo import MongoClient
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from PIL import Image, ImageOps
 from pillow_heif import register_heif_opener
 
@@ -353,6 +353,7 @@ def create_submission(
     longitude: float = Form(..., ge=-180, le=180),
     captured_at: datetime = Form(...),
     quantity: float = Form(1.0, gt=0),
+    client_id: str | None = Form(None, max_length=64),
     photo: UploadFile = File(...),
 ):
  
@@ -376,6 +377,13 @@ def create_submission(
     if user and user["role"] == "student":
         student_id = user["student_id"]
         school_id = user["school_id"]
+    
+    # Offline sync: the same client_id sent twice returns the original instead of a copy
+    if client_id:
+        existing = submissions.find_one({"student_id": student_id, "client_id": client_id})
+        if existing:
+            return {"id": str(existing["_id"]), "status": existing["status"],
+                    "duplicate": True, "message": "Already received"}    
 
         # Accept JPEG/PNG as-is; convert HEIC/HEIF/WebP to JPEG. Reject anything that isn't a real image.
     data = photo.file.read()
@@ -403,9 +411,17 @@ def create_submission(
         "quantity": quantity,
         "photo_file": filename,
         "status": "pending",
+        "client_id": client_id,
         "created_at": now,
     }
-    result = submissions.insert_one(doc)
+    try:
+        result = submissions.insert_one(doc)
+    except DuplicateKeyError:
+        # Two copies arrived at the same moment: keep the first, drop this one
+        os.remove(os.path.join(UPLOAD_DIR, filename))
+        existing = submissions.find_one({"student_id": student_id, "client_id": client_id})
+        return {"id": str(existing["_id"]), "status": existing["status"],
+                "duplicate": True, "message": "Already received"}
     background_tasks.add_task(process_submission_safe, result.inserted_id)
     return {"id": str(result.inserted_id), "status": "pending", "message": "Verification started"}
 
@@ -980,3 +996,30 @@ def submit_attestation(token: str, body: AttestIn):
     submissions.update_one({"_id": s["_id"]}, {"$set": update})
     students.update_one({"_id": s["student_id"]}, {"$set": profile}, upsert=True)
     return {"status": "verified", "kg_co2e": kg, "points_awarded": points, "new_badges": badges}
+# ---------- Offline sync ----------
+try:
+    submissions.create_index(
+        [("student_id", 1), ("client_id", 1)],
+        unique=True,
+        partialFilterExpression={"client_id": {"$type": "string"}},
+    )
+except PyMongoError:
+    pass
+
+
+class SyncIn(BaseModel):
+    client_ids: list[str] = Field(max_length=200)
+
+
+@app.post("/my/sync-status")
+def sync_status(body: SyncIn, request: Request):
+    """The app sends the IDs of its queued actions; the server says which it already has."""
+    sid = request.state.user["student_id"]
+    found = {
+        d["client_id"]: {"id": str(d["_id"]), "status": d["status"]}
+        for d in submissions.find(
+            {"student_id": sid, "client_id": {"$in": body.client_ids}},
+            {"client_id": 1, "status": 1},
+        )
+    }
+    return {cid: found.get(cid, {"status": "not_received"}) for cid in body.client_ids}
