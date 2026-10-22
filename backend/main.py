@@ -1,6 +1,7 @@
 ﻿import csv
 import io
 import os
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Literal
@@ -296,6 +297,9 @@ def process_submission(oid):
         "ai_check": out.get("ai_check"),
         "verified_at": datetime.now(timezone.utc),
     }
+    if out["status"] == "awaiting_guardian":
+        update["attest_token"] = secrets.token_hex(16)
+        update["attest_expires"] = datetime.now(timezone.utc) + timedelta(days=7)
     if "impact_kg_co2e" in out:
         update["impact_kg_co2e"] = out["impact_kg_co2e"]
         update["impact_method"] = out["impact_method"]
@@ -888,10 +892,91 @@ def school_report(school_id: str):
         w.writerow([
             s["captured_at"].strftime("%Y-%m-%d"), classes.get(s["student_id"], ""), s["action_type"],
             s.get("quantity", ""), s.get("impact_kg_co2e", ""), s.get("trust_score", ""),
-            s.get("reviewed_by") or "automatic pipeline",
+            s.get("reviewed_by") or (f"guardian: {s['attested_by']}" if s.get("attested_by") else "automatic pipeline"),
         ])
     return Response(
         content="\ufeff" + buf.getvalue(),
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="ecomesh_{school_id}_report.csv"'},
     )
+# ---------- Guardian attestation (home actions) ----------
+try:
+    submissions.create_index("attest_token", sparse=True)
+except PyMongoError:
+    pass
+
+
+class GuardianIn(BaseModel):
+    guardian_name: str = Field(min_length=2, max_length=80)
+    guardian_contact: str = Field(min_length=5, max_length=80)
+
+
+class AttestIn(BaseModel):
+    decision: Literal["confirm", "decline"]
+    guardian_name: str = Field(min_length=2, max_length=80)
+
+
+@app.post("/my/guardian")
+def set_guardian(body: GuardianIn, request: Request):
+    sid = request.state.user["student_id"]
+    students.update_one({"_id": sid}, {"$set": {"guardian": body.model_dump()}}, upsert=True)
+    return {"student_id": sid, "guardian_saved": True}
+
+
+def find_attestation(token):
+    s = submissions.find_one({"attest_token": token, "status": "awaiting_guardian"})
+    if s is None:
+        raise HTTPException(status_code=404, detail="Link not found or already used")
+    if as_utc(s["attest_expires"]) < datetime.now(timezone.utc):
+        raise HTTPException(status_code=410, detail="This confirmation link has expired")
+    return s
+
+
+@app.get("/attest/{token}")
+def view_attestation(token: str):
+    """Public page data for the guardian (no login)."""
+    s = find_attestation(token)
+    profile = students.find_one({"_id": s["student_id"]}) or {}
+    return {
+        "student_first_name": (profile.get("name") or s["student_id"]).split(" ")[0],
+        "action_type": s["action_type"],
+        "quantity": s.get("quantity"),
+        "unit": FACTORS[s["action_type"]]["unit"],
+        "captured_at": s["captured_at"],
+        "photo_url": f"/uploads/{s['photo_file']}",
+        "registered_guardian": (profile.get("guardian") or {}).get("guardian_name"),
+    }
+
+
+@app.post("/attest/{token}")
+def submit_attestation(token: str, body: AttestIn):
+    s = find_attestation(token)
+    update = {
+        "attested_by": body.guardian_name,
+        "attested_at": datetime.now(timezone.utc),
+        "attest_token": None,  # single use
+    }
+    if body.decision == "decline":
+        update["status"] = "needs_review"
+        update["verification_reasons"] = s.get("verification_reasons", []) + [
+            f"Guardian {body.guardian_name} did not confirm"
+        ]
+        submissions.update_one({"_id": s["_id"]}, {"$set": update})
+        return {"status": "needs_review"}
+
+    kg, method = estimate(s["action_type"], s.get("quantity", 1.0))
+    profile, points, badges = update_profile(
+        students.find_one({"_id": s["student_id"]}),
+        kg,
+        s["captured_at"].date().isoformat(),
+        s["action_type"],
+    )
+    update.update({
+        "status": "verified",
+        "impact_kg_co2e": kg,
+        "impact_method": method,
+        "points_awarded": points,
+    })
+    submissions.update_one({"_id": s["_id"]}, {"$set": update})
+    students.update_one({"_id": s["student_id"]}, {"$set": profile}, upsert=True)
+    return {"status": "verified", "kg_co2e": kg, "points_awarded": points, "new_badges": badges}

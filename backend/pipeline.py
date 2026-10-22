@@ -38,7 +38,6 @@ def rules_node(state: PipelineState):
         state.get("school"),
         state.get("existing_phashes", set()),
     )
-    # Hard rejects (missing photo, duplicate, future timestamp) return trust 0.0
     hard = status == "rejected" and trust == 0.0
     return {
         "status": status,
@@ -72,6 +71,14 @@ def vision_node(state: PipelineState):
     }
 
 
+def guardian_node(state: PipelineState):
+    """Home actions need a guardian's confirmation before impact and points are awarded."""
+    return {
+        "status": "awaiting_guardian",
+        "reasons": state["reasons"] + ["Home action: waiting for guardian confirmation"],
+    }
+
+
 def impact_node(state: PipelineState):
     s = state["submission"]
     kg, note = estimate(s["action_type"], s.get("quantity", 1.0))
@@ -92,18 +99,26 @@ def route_after_rules(state: PipelineState):
 
 
 def route_after_vision(state: PipelineState):
-    return "impact" if state["status"] == "verified" else "stop"
+    if state["status"] != "verified":
+        return "stop"
+    if state["submission"].get("context") == "home":
+        return "guardian"
+    return "impact"
 
 
 def build_graph():
     g = StateGraph(PipelineState)
     g.add_node("rules", rules_node)
     g.add_node("vision", vision_node)
+    g.add_node("guardian", guardian_node)
     g.add_node("impact", impact_node)
     g.add_node("gamification", gamification_node)
     g.set_entry_point("rules")
     g.add_conditional_edges("rules", route_after_rules, {"vision": "vision", "stop": END})
-    g.add_conditional_edges("vision", route_after_vision, {"impact": "impact", "stop": END})
+    g.add_conditional_edges(
+        "vision", route_after_vision, {"impact": "impact", "guardian": "guardian", "stop": END}
+    )
+    g.add_edge("guardian", END)
     g.add_edge("impact", "gamification")
     g.add_edge("gamification", END)
     return g.compile()
