@@ -14,10 +14,12 @@ class PipelineState(TypedDict, total=False):
     school: Optional[dict]
     upload_dir: str
     existing_hashes: set
+    existing_phashes: set
     status: str
     trust_score: float
     reasons: List[str]
     photo_hash: Optional[str]
+    photo_phash: Optional[str]
     hard_reject: bool
     ai_check: Optional[dict]
     impact_kg_co2e: float
@@ -29,11 +31,12 @@ class PipelineState(TypedDict, total=False):
 
 
 def rules_node(state: PipelineState):
-    status, trust, reasons, photo_hash = verify(
+    status, trust, reasons, photo_hash, photo_phash = verify(
         state["submission"],
         state["upload_dir"],
         state["existing_hashes"],
         state.get("school"),
+        state.get("existing_phashes", set()),
     )
     # Hard rejects (missing photo, duplicate, future timestamp) return trust 0.0
     hard = status == "rejected" and trust == 0.0
@@ -42,6 +45,7 @@ def rules_node(state: PipelineState):
         "trust_score": trust,
         "reasons": reasons,
         "photo_hash": photo_hash,
+        "photo_phash": photo_phash,
         "hard_reject": hard,
     }
 

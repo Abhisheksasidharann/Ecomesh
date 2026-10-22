@@ -15,6 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
+from PIL import Image, ImageOps
+from pillow_heif import register_heif_opener
+
+register_heif_opener()  # lets Pillow open iPhone HEIC photos
 
 load_dotenv()
 
@@ -266,16 +270,21 @@ def process_submission(oid):
     s = submissions.find_one({"_id": oid, "status": "pending"})
     if s is None:
         return None
-    existing = {
-        d["photo_hash"]
-        for d in submissions.find({"photo_hash": {"$exists": True}, "_id": {"$ne": oid}}, {"photo_hash": 1})
-        if d.get("photo_hash")
-    }
+    existing, existing_ph = set(), set()
+    for d in submissions.find(
+        {"_id": {"$ne": oid}, "$or": [{"photo_hash": {"$exists": True}}, {"photo_phash": {"$exists": True}}]},
+        {"photo_hash": 1, "photo_phash": 1},
+    ):
+        if d.get("photo_hash"):
+            existing.add(d["photo_hash"])
+        if d.get("photo_phash"):
+            existing_ph.add(d["photo_phash"])
     out = graph.invoke({
         "submission": s,
         "school": schools.find_one({"_id": s["school_id"]}),
         "upload_dir": UPLOAD_DIR,
         "existing_hashes": existing,
+        "existing_phashes": existing_ph,
         "student_profile": students.find_one({"_id": s["student_id"]}),
     })
     update = {
@@ -283,6 +292,7 @@ def process_submission(oid):
         "trust_score": out["trust_score"],
         "verification_reasons": out["reasons"],
         "photo_hash": out["photo_hash"],
+        "photo_phash": out.get("photo_phash"),
         "ai_check": out.get("ai_check"),
         "verified_at": datetime.now(timezone.utc),
     }
@@ -341,8 +351,7 @@ def create_submission(
     quantity: float = Form(1.0, gt=0),
     photo: UploadFile = File(...),
 ):
-    if photo.content_type not in ("image/jpeg", "image/png"):
-        raise HTTPException(status_code=400, detail="Photo must be JPEG or PNG")
+ 
 
     max_q = MAX_QUANTITY[action_type]
     if quantity > max_q:
@@ -364,10 +373,21 @@ def create_submission(
         student_id = user["student_id"]
         school_id = user["school_id"]
 
-    ext = ".png" if photo.content_type == "image/png" else ".jpg"
-    filename = uuid.uuid4().hex + ext
-    with open(os.path.join(UPLOAD_DIR, filename), "wb") as f:
-        f.write(photo.file.read())
+        # Accept JPEG/PNG as-is; convert HEIC/HEIF/WebP to JPEG. Reject anything that isn't a real image.
+    data = photo.file.read()
+    try:
+        img = Image.open(io.BytesIO(data))
+        img.load()
+    except Exception:
+        raise HTTPException(status_code=400, detail="File is not a readable image (use JPEG, PNG, HEIC or WebP)")
+    if img.format in ("JPEG", "PNG"):
+        ext = ".png" if img.format == "PNG" else ".jpg"
+        filename = uuid.uuid4().hex + ext
+        with open(os.path.join(UPLOAD_DIR, filename), "wb") as f:
+            f.write(data)
+    else:
+        filename = uuid.uuid4().hex + ".jpg"
+        ImageOps.exif_transpose(img).convert("RGB").save(os.path.join(UPLOAD_DIR, filename), "JPEG", quality=90)
 
     doc = {
         "student_id": student_id,

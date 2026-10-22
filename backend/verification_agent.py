@@ -3,10 +3,14 @@ import math
 import os
 from datetime import datetime, timezone
 
+import imagehash
+from PIL import Image
+
 MAX_AGE_HOURS = 24
 BASE_TRUST = {"school": 0.6, "home": 0.4}
 VERIFY_THRESHOLD = 0.7
 REJECT_THRESHOLD = 0.3
+PHASH_THRESHOLD = 6  # max differing bits (of 64) to count as the same picture
 
 
 def haversine_m(lat1, lng1, lat2, lng2):
@@ -24,21 +28,45 @@ def file_hash(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-def verify(submission, upload_dir, existing_hashes, school=None):
-    """school is the school's document from MongoDB (lat, lng, radius_m) or None.
-    Returns (status, trust_score, reasons, photo_hash)."""
+def image_phash(path):
+    """Perceptual hash: similar-looking images get similar hashes."""
+    try:
+        with Image.open(path) as img:
+            return str(imagehash.phash(img))
+    except Exception:
+        return None
+
+
+def is_near_duplicate(phash, existing_phashes):
+    h = imagehash.hex_to_hash(phash)
+    for other in existing_phashes:
+        try:
+            if h - imagehash.hex_to_hash(other) <= PHASH_THRESHOLD:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def verify(submission, upload_dir, existing_hashes, school=None, existing_phashes=()):
+    """Returns (status, trust_score, reasons, photo_hash, photo_phash)."""
     reasons = []
     trust = BASE_TRUST.get(submission["context"], 0.4)
 
     # Photo check
     path = os.path.join(upload_dir, submission["photo_file"])
     if not os.path.exists(path) or os.path.getsize(path) == 0:
-        return "rejected", 0.0, ["Photo missing or empty"], None
+        return "rejected", 0.0, ["Photo missing or empty"], None, None
     photo_hash = file_hash(path)
+    photo_phash = image_phash(path)
 
-    # Duplicate check
+    # Exact duplicate
     if photo_hash in existing_hashes:
-        return "rejected", 0.0, ["Duplicate photo already submitted"], photo_hash
+        return "rejected", 0.0, ["Duplicate photo already submitted"], photo_hash, photo_phash
+
+    # Near duplicate (resized, recompressed or lightly edited copy)
+    if photo_phash and is_near_duplicate(photo_phash, existing_phashes):
+        return "rejected", 0.0, ["Near-duplicate: an edited or resized copy of an earlier photo"], photo_hash, photo_phash
 
     # Timestamp check
     captured = submission["captured_at"]
@@ -46,7 +74,7 @@ def verify(submission, upload_dir, existing_hashes, school=None):
         captured = captured.replace(tzinfo=timezone.utc)
     age_h = (datetime.now(timezone.utc) - captured).total_seconds() / 3600
     if age_h < -0.1:
-        return "rejected", 0.0, ["Timestamp is in the future"], photo_hash
+        return "rejected", 0.0, ["Timestamp is in the future"], photo_hash, photo_phash
     if age_h > MAX_AGE_HOURS:
         reasons.append(f"Photo older than {MAX_AGE_HOURS}h")
         trust -= 0.3
@@ -77,11 +105,10 @@ def verify(submission, upload_dir, existing_hashes, school=None):
             trust += 0.1
 
     trust = round(max(0.0, min(1.0, trust)), 2)
-
     if trust >= VERIFY_THRESHOLD:
         status = "verified"
     elif trust < REJECT_THRESHOLD:
         status = "rejected"
     else:
         status = "needs_review"
-    return status, trust, reasons, photo_hash
+    return status, trust, reasons, photo_hash, photo_phash
