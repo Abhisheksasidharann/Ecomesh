@@ -656,9 +656,14 @@ def student_summary(student_id: str):
 
 
 @app.get("/leaderboard/{school_id}")
-def leaderboard(school_id: str, group: Literal["class", "house", "student"] = "class", limit: int = 10):
+def leaderboard(school_id: str, group: Literal["class", "house", "student"] = "class", limit: int = 10,
+        class_name: str | None = None, house: str | None = None):
     limit = min(limit, 100)
     match = {"school_id": school_id}
+    if class_name:
+        match["class_name"] = class_name
+    if house:
+        match["house"] = house
     if group == "student":
         rows = students.find(match).sort("points", -1).limit(limit)
         return [
@@ -749,9 +754,12 @@ def login(body: LoginIn):
     u = users.find_one({"_id": body.username})
     if u is None or not check_password(body.password, u["password_hash"]):
         raise HTTPException(status_code=401, detail="Wrong username or password")
+    profile = students.find_one({"_id": u["student_id"]}) if u.get("student_id") else None
+    profile = profile or {}
     return {
         "access_token": make_token(u), "token_type": "bearer", "role": u["role"],
         "school_id": u.get("school_id"), "student_id": u.get("student_id"),
+        "name": profile.get("name"), "class_name": profile.get("class_name"), "house": profile.get("house"),
     }
 
 
@@ -1156,3 +1164,22 @@ def admin_delete_user(username: str):
         erase_student(u["student_id"])
     users.delete_one({"_id": username})
     return {"deleted": username}
+
+# ---------- Token refresh & funds list ----------
+@app.post("/auth/refresh")
+def refresh_token(user: dict = Depends(get_current_user)):
+    """Swap a still-valid token for a fresh 12-hour one. An expired token means logging in again."""
+    u = users.find_one({"_id": user["username"]})
+    if u is None:
+        raise HTTPException(status_code=401, detail="Account no longer exists")
+    return {"access_token": make_token(u), "token_type": "bearer", "role": u["role"],
+            "school_id": u.get("school_id"), "student_id": u.get("student_id")}
+
+
+@app.get("/schools/{school_id}/funds")
+def list_funds(school_id: str):
+    return {
+        "school_id": school_id,
+        "available_budget": available_budget(school_id),
+        "funds": [clean(f) for f in funds.find({"school_id": school_id}).sort("received_at", -1)],
+    }
