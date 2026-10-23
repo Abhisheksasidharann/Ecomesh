@@ -1023,3 +1023,71 @@ def sync_status(body: SyncIn, request: Request):
         )
     }
     return {cid: found.get(cid, {"status": "not_received"}) for cid in body.client_ids}
+
+# ---------- Password change & account deletion (child data protection) ----------
+import hashlib
+
+
+class PasswordChangeIn(BaseModel):
+    old_password: str
+    new_password: str = Field(min_length=6, max_length=64)
+
+
+class DeleteAccountIn(BaseModel):
+    password: str
+
+
+def erase_student(student_id):
+    """Removes personal data and photos; keeps anonymised verified impact for school totals."""
+    anon = "deleted-" + hashlib.sha256(student_id.encode()).hexdigest()[:10]
+    for s in submissions.find({"student_id": student_id}, {"photo_file": 1}):
+        if s.get("photo_file"):
+            try:
+                os.remove(os.path.join(UPLOAD_DIR, s["photo_file"]))
+            except FileNotFoundError:
+                pass
+    submissions.delete_many(
+        {"student_id": student_id, "status": {"$in": ["pending", "needs_review", "awaiting_guardian"]}}
+    )
+    submissions.update_many(
+        {"student_id": student_id},
+        {"$set": {"student_id": anon, "photo_file": None, "location": None, "attest_token": None},
+         "$unset": {"attested_by": "", "ai_check": "", "client_id": ""}},
+    )
+    students.delete_one({"_id": student_id})
+    missions_col.delete_many({"student_id": student_id})
+    return anon
+
+
+@app.post("/auth/change-password")
+def change_password(body: PasswordChangeIn, user: dict = Depends(get_current_user)):
+    u = users.find_one({"_id": user["username"]})
+    if u is None or not check_password(body.old_password, u["password_hash"]):
+        raise HTTPException(status_code=401, detail="Current password is wrong")
+    users.update_one({"_id": u["_id"]}, {"$set": {"password_hash": hash_password(body.new_password)}})
+    return {"changed": True}
+
+
+@app.post("/my/delete-account")
+def delete_my_account(body: DeleteAccountIn, request: Request):
+    user = request.state.user
+    u = users.find_one({"_id": user["username"]})
+    if u is None or not check_password(body.password, u["password_hash"]):
+        raise HTTPException(status_code=401, detail="Password is wrong")
+    erase_student(user["student_id"])
+    users.delete_one({"_id": u["_id"]})
+    return {"deleted": True,
+            "note": "Personal data and photos removed; anonymised impact kept in school totals"}
+
+
+@app.post("/auth/users/{username}/delete")
+def admin_delete_user(username: str):
+    u = users.find_one({"_id": username})
+    if u is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if u["role"] == "admin" and users.count_documents({"role": "admin"}) <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the last admin")
+    if u.get("student_id"):
+        erase_student(u["student_id"])
+    users.delete_one({"_id": username})
+    return {"deleted": username}

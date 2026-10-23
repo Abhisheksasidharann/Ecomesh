@@ -29,9 +29,11 @@ FACTORS = {
     },
     "water_conservation": {
         "unit": "litre",
-        "factor": 0.0003,
-        "basis": "PLACEHOLDER: energy for water pumping/treatment not yet sourced",
-        "source": "UNVERIFIED - replace before citing",
+        "factor": 0.00029,
+        "basis": "Energy avoided per litre saved: ~0.3 Wh/L supply + ~0.1 Wh/L wastewater treatment "
+                 "(Indian cities) = 0.0004 kWh/L x 0.727 kg CO2/kWh grid factor",
+        "source": "Indian urban water/wastewater end-use energy intensity study (Environmental Engineering, 2013); "
+                  "CEA CO2 Baseline Database v20.0",
     },
 }
 
