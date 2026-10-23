@@ -1,6 +1,7 @@
 ﻿import csv
 import io
 import os
+import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -11,7 +12,7 @@ from bson.errors import InvalidId
 from dotenv import load_dotenv
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from pymongo import MongoClient
@@ -44,6 +45,64 @@ missions_col = db["missions"]
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Photos are stored in Supabase Storage; the local folder is only a cache
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+PHOTO_BUCKET = os.getenv("SUPABASE_BUCKET", "photos")
+_supabase = None
+
+
+def photo_bucket():
+    """Returns the Supabase bucket, or None if Supabase is not configured."""
+    global _supabase
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return None
+    if _supabase is None:
+        from supabase import create_client
+        _supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    return _supabase.storage.from_(PHOTO_BUCKET)
+
+
+def store_photo(filename, data, content_type="image/jpeg"):
+    bucket = photo_bucket()
+    if bucket is None:
+        print("Supabase not configured: photo kept locally only")
+        return False
+    try:
+        bucket.upload(filename, data, {"content-type": content_type, "upsert": "true"})
+        return True
+    except Exception as e:
+        print(f"Photo upload to Supabase failed for {filename}: {e}")
+        return False
+
+
+def ensure_local(filename):
+    """Restore a photo from Supabase to the local cache if it is missing."""
+    path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.exists(path):
+        bucket = photo_bucket()
+        if bucket is not None:
+            try:
+                data = bucket.download(filename)
+                with open(path, "wb") as f:
+                    f.write(data)
+            except Exception as e:
+                print(f"Photo download from Supabase failed for {filename}: {e}")
+    return path
+
+
+def delete_photo(filename):
+    try:
+        os.remove(os.path.join(UPLOAD_DIR, filename))
+    except FileNotFoundError:
+        pass
+    bucket = photo_bucket()
+    if bucket is not None:
+        try:
+            bucket.remove([filename])
+        except Exception as e:
+            print(f"Photo delete in Supabase failed for {filename}: {e}")
 
 # Upper limits per submission (stops "999999 saplings" inflating totals)
 MAX_QUANTITY = {
@@ -86,8 +145,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Photos are viewable at /uploads/<photo_file>
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+@app.get("/uploads/{filename}")
+def get_photo(filename: str):
+    if not re.fullmatch(r"[0-9A-Za-z_]+\.(jpg|png)", filename):
+        raise HTTPException(status_code=404, detail="Photo not found")
+    path = ensure_local(filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Photo not found")
+    return FileResponse(path, media_type="image/png" if filename.endswith(".png") else "image/jpeg")
 
 
 @app.exception_handler(PyMongoError)
@@ -271,6 +336,7 @@ def process_submission(oid):
     s = submissions.find_one({"_id": oid, "status": "pending"})
     if s is None:
         return None
+    ensure_local(s["photo_file"])
     existing, existing_ph = set(), set()
     for d in submissions.find(
         {"_id": {"$ne": oid}, "$or": [{"photo_hash": {"$exists": True}}, {"photo_phash": {"$exists": True}}]},
@@ -392,14 +458,16 @@ def create_submission(
         img.load()
     except Exception:
         raise HTTPException(status_code=400, detail="File is not a readable image (use JPEG, PNG, HEIC or WebP)")
-    if img.format in ("JPEG", "PNG"):
-        ext = ".png" if img.format == "PNG" else ".jpg"
-        filename = uuid.uuid4().hex + ext
-        with open(os.path.join(UPLOAD_DIR, filename), "wb") as f:
-            f.write(data)
-    else:
-        filename = uuid.uuid4().hex + ".jpg"
-        ImageOps.exif_transpose(img).convert("RGB").save(os.path.join(UPLOAD_DIR, filename), "JPEG", quality=90)
+        # Normalise: upright, max 1600 px, JPEG, metadata (incl. phone GPS) stripped
+    img = ImageOps.exif_transpose(img).convert("RGB")
+    img.thumbnail((1600, 1600))
+    out_buf = io.BytesIO()
+    img.save(out_buf, "JPEG", quality=85)
+    jpeg = out_buf.getvalue()
+    filename = uuid.uuid4().hex + ".jpg"
+    with open(os.path.join(UPLOAD_DIR, filename), "wb") as f:
+        f.write(jpeg)
+    store_photo(filename, jpeg)
 
     doc = {
         "student_id": student_id,
@@ -418,7 +486,7 @@ def create_submission(
         result = submissions.insert_one(doc)
     except DuplicateKeyError:
         # Two copies arrived at the same moment: keep the first, drop this one
-        os.remove(os.path.join(UPLOAD_DIR, filename))
+        delete_photo(filename)
         existing = submissions.find_one({"student_id": student_id, "client_id": client_id})
         return {"id": str(existing["_id"]), "status": existing["status"],
                 "duplicate": True, "message": "Already received"}
@@ -1042,10 +1110,7 @@ def erase_student(student_id):
     anon = "deleted-" + hashlib.sha256(student_id.encode()).hexdigest()[:10]
     for s in submissions.find({"student_id": student_id}, {"photo_file": 1}):
         if s.get("photo_file"):
-            try:
-                os.remove(os.path.join(UPLOAD_DIR, s["photo_file"]))
-            except FileNotFoundError:
-                pass
+            delete_photo(s["photo_file"])
     submissions.delete_many(
         {"student_id": student_id, "status": {"$in": ["pending", "needs_review", "awaiting_guardian"]}}
     )
